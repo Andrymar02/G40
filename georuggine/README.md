@@ -29,7 +29,7 @@ georuggine/
 
 - Accetta connessioni su `0.0.0.0:8080`, un task `tokio::spawn` per client.
 - Gestisce `Login` (sempre accettato, nessuna verifica password/duplicati), `ChatToServer` (broadcast a tutti tranne il mittente), logga `Register`/`PositionUpdate` senza elaborarli.
-- Stato condiviso: `Arc<Mutex<HashMap<String, OwnedWriteHalf>>>` — funziona ma **non è il design finale** (vedi sotto).
+- Stato condiviso: `Arc<Mutex<HashMap<String, mpsc::Sender<ServerMessage>>>>` (pattern attore, ✅ implementato). Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf` e riceve i messaggi da spedire da un `mpsc::channel` (capacità 32); `send_to`/`broadcast` tengono il lock della mappa solo per la lookup/clone del `Sender`, mai durante la scrittura in rete.
 
 ### `client` (🟡 scheletro minimo)
 
@@ -37,7 +37,8 @@ georuggine/
 
 ### Verificato manualmente
 
-Login end-to-end testato avviando `server` e `client` in due terminali: il client riceve `LoginOk`, il server logga login e disconnessione.
+- Login end-to-end (anche dopo il refactor a `mpsc`) testato avviando `server` e `client` in due terminali: il client riceve `LoginOk` tramite il nuovo `writer_task`, il server logga login, position update e disconnessione.
+- **Non ancora verificato**: `broadcast`/messaggi tra più client contemporaneamente. Richiede almeno due connessioni client attive insieme (una che manda `ChatToServer`, una in ascolto) — il client attuale non lo supporta ancora (si veda "Client che resta connesso" nella roadmap).
 
 ## Come si esegue
 
@@ -65,8 +66,10 @@ cargo test -p common
 ## Cosa manca / cosa cambierà (roadmap)
 
 **Da rifare — priorità alta:**
-- **Pattern attore per lo stato condiviso.** Oggi scrivere a un client richiede il lock dell'intera `Mutex<HashMap<...>>` per tutta la durata della scrittura in rete: con più client questo serializza tutte le scritture e un client lento rallenta gli altri (broadcast in particolare). Da sostituire con un `mpsc::Sender<ServerMessage>` per client: ogni client ha il proprio task che possiede la sua metà di scrittura e riceve messaggi da un channel, senza lock condivisi sull'I/O.
-- **Client che resta connesso.** Il client attuale fa un solo giro login e chiude. Serve un loop che legga da stdin (o da una UI) e mandi `PositionUpdate`/`ChatToServer`, mentre in parallelo legge messaggi in arrivo dal server (serviranno due task, uno per direzione, o `tokio::select!`).
+- **Client che resta connesso.** Il client attuale fa un solo giro login e chiude. Serve un loop che legga da stdin (o da una UI) e mandi `PositionUpdate`/`ChatToServer`, mentre in parallelo legge messaggi in arrivo dal server (serviranno due task, uno per direzione, o `tokio::select!`). Finché non c'è, **il broadcast non è verificabile manualmente**: servono almeno due client connessi insieme, uno che manda chat e uno in ascolto — cosa che lo scheletro attuale non supporta (vedi "Verificato manualmente" sotto).
+
+**Miglioria possibile, non bloccante:**
+- `broadcast` (in `server`) itera ancora i destinatari in sequenza, non in parallelo: un client con canale pieno rallenta comunque l'invio ai successivi nel giro (solo senza più tenere il lock condiviso, quindi senza bloccare login/disconnessioni). Se servirà vero parallelismo si può passare a un fan-out con `join_all` sulle singole `send`.
 
 **Da implementare — logica applicativa:**
 - Autenticazione vera: verifica password (con hashing, non testo in chiaro), storage utenti persistente, rifiuto username duplicati/`LoginErr` con motivo.
