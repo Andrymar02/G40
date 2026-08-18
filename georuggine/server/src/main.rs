@@ -1,3 +1,5 @@
+mod users;
+
 use common::framing;
 use common::{ClientMessage, ServerMessage};
 use std::collections::HashMap;
@@ -7,6 +9,12 @@ use std::sync::Arc;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
+use users::Users;
+
+/// File in cui persistono le credenziali registrate (JSON, vedi `users`).
+/// Percorso relativo alla working directory da cui si lancia `cargo run -p
+/// server` (di norma la radice del workspace).
+const USERS_FILE: &str = "users.json";
 
 /// Capacità del channel per-client: quanti `ServerMessage` possono restare
 /// in coda prima che chi manda (`send_to`/`broadcast`) resti in attesa sul
@@ -25,6 +33,7 @@ type Clients = Arc<Mutex<HashMap<String, mpsc::Sender<ServerMessage>>>>;
 async fn main() -> io::Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
     let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
+    let users: Users = users::UserStore::load(USERS_FILE);
 
     println!("Server in ascolto su 0.0.0.0:8080");
 
@@ -32,10 +41,11 @@ async fn main() -> io::Result<()> {
         // Accetto nuovo client connesso
         let (socket, addr) = listener.accept().await?;
         let clients = clients.clone();
+        let users = users.clone();
         println!("{:?} {:?}", socket, addr);
         // Creo task tokio per quel client
         tokio::spawn(async move {
-            handle_client(socket, addr, clients).await;
+            handle_client(socket, addr, clients, users).await;
         });
     }
 }
@@ -54,7 +64,7 @@ async fn writer_task(mut write_half: OwnedWriteHalf, mut rx: mpsc::Receiver<Serv
     }
 }
 
-async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) {
+async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients, users: Users) {
     let (mut read_half, write_half) = socket.into_split();
 
     let (tx, rx) = mpsc::channel::<ServerMessage>(CLIENT_CHANNEL_CAPACITY);
@@ -67,6 +77,7 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) {
     loop {
         let msg: ClientMessage = match framing::read_message(&mut read_half).await {
             Ok(msg) => msg,
+            // uscita dal loop handle avviene qui quando altro lato tcp si stacca (client)
             Err(e) => {
                 println!("[{addr}] connessione chiusa o errore di lettura: {e}");
                 break;
@@ -74,27 +85,33 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) {
         };
 
         match msg {
-            ClientMessage::Login { username: u, password: _ } => {
-                // PROBLEMA: nessuna verifica reale della password e nessun
-                // controllo di username duplicati (un secondo login con lo
-                // stesso username sovrascrive silenziosamente il primo
-                // nella mappa) — manca uno storage utenti, fuori scope per
-                // questo scheletro. Qui si accetta sempre.
-                if username.is_none() {
+            ClientMessage::Login { username: u, password: p } => {
+                if username.is_some() {
+                    // Già loggato in questa stessa connessione: ignora.
+                    println!("[{addr}] login ripetuto ignorato");
+                } else if users.verify(&u, &p).await {
                     println!("[{addr}] login: {u}");
                     clients.lock().await.insert(u.clone(), tx.clone());
                     username = Some(u.clone());
-                    send_to(&clients, &u, ServerMessage::LoginOk).await;
+                    let _ = tx.send(ServerMessage::LoginOk).await;
                 } else {
-                    // Già loggato in questa stessa connessione: ignora.
-                    println!("[{addr}] login ripetuto ignorato");
+                    println!("[{addr}] login fallito: {u}");
+                    let _ = tx
+                        .send(ServerMessage::LoginErr("credenziali non valide".to_string()))
+                        .await;
                 }
             }
-            ClientMessage::Register { username: u, password: _ } => {
-                // PROBLEMA: nessuna persistenza reale, "registrare" qui non
-                // fa altro che loggare la richiesta. Da collegare a uno
-                // storage utenti quando esisterà (fuori scope Fase 1).
-                println!("[{addr}] register: {u}");
+            ClientMessage::Register { username: u, password: p } => {
+                match users.register(&u, &p).await {
+                    Ok(()) => {
+                        println!("[{addr}] registrazione: {u}");
+                        let _ = tx.send(ServerMessage::RegisterOk).await;
+                    }
+                    Err(reason) => {
+                        println!("[{addr}] registrazione fallita per {u}: {reason}");
+                        let _ = tx.send(ServerMessage::RegisterErr(reason)).await;
+                    }
+                }
             }
             ClientMessage::PositionUpdate { lat, lon, timestamp } => {
                 println!("[{addr}] posizione: ({lat}, {lon}) @ {timestamp}");
@@ -114,24 +131,6 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) {
     if let Some(u) = username {
         clients.lock().await.remove(&u);
         println!("[{addr}] disconnesso: {u}");
-    }
-}
-
-/// Invia `msg` a un singolo client cercandolo per username nella mappa
-/// condivisa.
-///
-/// Il lock viene tenuto solo per la lookup/clone del `Sender`: la vera
-/// scrittura sul socket avviene nel `writer_task` del destinatario, quindi
-/// qui non si aspetta mai I/O di rete a lock preso.
-async fn send_to(clients: &Clients, username: &str, msg: ServerMessage) {
-    let sender = clients.lock().await.get(username).cloned();
-    match sender {
-        Some(sender) => {
-            if sender.send(msg).await.is_err() {
-                println!("invio a {username} fallito: canale chiuso");
-            }
-        }
-        None => println!("invio a {username} fallito: utente non connesso"),
     }
 }
 

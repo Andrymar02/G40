@@ -20,7 +20,7 @@ georuggine/
 
 ### `common` — protocollo e framing (✅ implementato)
 
-- **`ClientMessage`** (`Login`, `Register`, `PositionUpdate`, `ChatToServer`) e **`ServerMessage`** (`LoginOk`, `LoginErr`, `Broadcast`, `Direct`, `StateChanged`) — enum serializzabili con `serde`.
+- **`ClientMessage`** (`Login`, `Register`, `PositionUpdate`, `ChatToServer`) e **`ServerMessage`** (`LoginOk`, `LoginErr`, `RegisterOk`, `RegisterErr`, `Broadcast`, `Direct`, `StateChanged`) — enum serializzabili con `serde`.
 - **`UserState`** (`Disconnected`, `Idle`, `Moving`) — stato di un utente.
 - **Modulo `framing`**: serializzazione JSON + framing *length-prefixed* su TCP (4 byte di lunghezza big-endian + payload), asincrono (`tokio::io::AsyncRead`/`AsyncWrite`). Include un cap (`MAX_MESSAGE_SIZE`, 1 MiB) contro payload dichiarati enormi.
 - 3 test automatici (roundtrip `ClientMessage`/`ServerMessage`, rifiuto messaggi oversize) — `cargo test -p common`.
@@ -28,8 +28,10 @@ georuggine/
 ### `server` (🟡 scheletro funzionante, non production-ready)
 
 - Accetta connessioni su `0.0.0.0:8080`, un task `tokio::spawn` per client.
-- Gestisce `Login` (sempre accettato, nessuna verifica password/duplicati), `ChatToServer` (broadcast a tutti tranne il mittente), logga `Register`/`PositionUpdate` senza elaborarli.
-- Stato condiviso: `Arc<Mutex<HashMap<String, mpsc::Sender<ServerMessage>>>>` (pattern attore, ✅ implementato). Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf` e riceve i messaggi da spedire da un `mpsc::channel` (capacità 32); `send_to`/`broadcast` tengono il lock della mappa solo per la lookup/clone del `Sender`, mai durante la scrittura in rete.
+- Gestisce `Login`/`Register` con verifica reale contro lo storage utenti (✅, vedi sotto), `ChatToServer` (broadcast a tutti tranne il mittente), logga `PositionUpdate` senza elaborarlo.
+- Stato condiviso: `Arc<Mutex<HashMap<String, mpsc::Sender<ServerMessage>>>>` (pattern attore, ✅ implementato). Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf` e riceve i messaggi da spedire da un `mpsc::channel` (capacità 32); `broadcast` tiene il lock della mappa solo per la lookup/clone del `Sender`, mai durante la scrittura in rete.
+- **Autenticazione base (✅ implementata, versione minima)**: `server::users::UserStore` (`struct` con `impl`, non funzioni libere: `UserStore::load(path)`, poi `store.register(user, pw)`/`store.verify(user, pw)`), condiviso tra i task come `Arc<UserStore>` (alias `Users`), stesso pattern di `Clients`. Dentro, un `HashMap<String, String>` (`username -> password`, in chiaro, vedi limitazioni sotto) persistito sul file JSON passato a `load` (`users.json`, path in `USERS_FILE`), caricato all'avvio e riscritto ad ogni registrazione riuscita. Username duplicato → `RegisterErr`; credenziali errate al login → `LoginErr`. Separato dalla mappa `Clients`: quella è "chi è connesso ora" (effimera), questa è "chi è registrato" (persistente).
+  - **Limitazioni note, accettate per questa prima versione**: password in chiaro sia in memoria che su file (da sostituire con hashing, es. `argon2`, quando si affronterà la sicurezza); il file viene riscritto per intero ad ogni registrazione (va bene per pochi utenti, non scala); nessuna gestione di corruzione/scrittura concorrente sul file oltre al lock in memoria.
 
 ### `client` (🟡 scheletro minimo)
 
@@ -38,6 +40,7 @@ georuggine/
 ### Verificato manualmente
 
 - Login end-to-end (anche dopo il refactor a `mpsc`) testato avviando `server` e `client` in due terminali: il client riceve `LoginOk` tramite il nuovo `writer_task`, il server logga login, position update e disconnessione.
+- Autenticazione testata con un piccolo client TCP ad hoc (non nel repo): registrazione nuova → `RegisterOk`; registrazione con username già in uso → `RegisterErr("username già in uso")`; login con password sbagliata → `LoginErr("credenziali non valide")`; login corretto → `LoginOk`; **riavviato il server**, login con le stesse credenziali → ancora `LoginOk` (conferma che `users.json` persiste correttamente).
 - **Non ancora verificato**: `broadcast`/messaggi tra più client contemporaneamente. Richiede almeno due connessioni client attive insieme (una che manda `ChatToServer`, una in ascolto) — il client attuale non lo supporta ancora (si veda "Client che resta connesso" nella roadmap).
 
 ## Come si esegue
@@ -72,17 +75,13 @@ cargo test -p common
 - `broadcast` (in `server`) itera ancora i destinatari in sequenza, non in parallelo: un client con canale pieno rallenta comunque l'invio ai successivi nel giro (solo senza più tenere il lock condiviso, quindi senza bloccare login/disconnessioni). Se servirà vero parallelismo si può passare a un fan-out con `join_all` sulle singole `send`.
 
 **Da implementare — logica applicativa:**
-- Autenticazione vera: verifica password (con hashing, non testo in chiaro), storage utenti persistente, rifiuto username duplicati/`LoginErr` con motivo.
-- `Register` non fa nulla di reale: va collegato allo storage utenti quando esisterà.
 - `PositionUpdate` non aggiorna né propaga lo `UserState` — va decisa come gruppo la logica di transizione (es. quando un utente passa da `Idle` a `Moving`) prima di implementarla, e poi mandare `ServerMessage::StateChanged` agli utenti interessati.
 - Messaggi diretti (`ServerMessage::Direct`) — il tipo esiste nel protocollo ma nessun percorso lo usa ancora.
 
 **Decisioni ancora aperte, da discutere come gruppo:**
 - Sicurezza del trasporto (TLS?) — al momento tutto viaggia in chiaro, incluse le password nel messaggio `Login`.
+- Hashing delle password (`argon2`/`bcrypt`) — oggi sono in chiaro sia in memoria che nel file `users.json`, accettato come scelta temporanea per la prima versione dell'autenticazione.
 - Se/quando passare da JSON a un formato binario (`bincode`) per prestazioni.
-- Persistenza (file? database?) per utenti e cronologia messaggi.
+- Persistenza per la cronologia messaggi (gli utenti ora persistono già su file, vedi sopra) — file o database?
 - Gestione riconnessioni/timeout lato client e server.
 
-## File di configurazione
-
-- **`.gitignore`** (alla radice del repo) esclude `target/`, backup di `rustfmt`, file di editor/OS. `Cargo.lock` è invece **committato di proposito**: il workspace produce binari (`server`, `client`), quindi tutti devono buildare con le stesse versioni esatte delle dipendenze.

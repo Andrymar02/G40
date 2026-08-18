@@ -7,9 +7,15 @@ target/
 # Debug info generata dai build MSVC (irrilevante su Linux, ma innocuo tenerlo)
 *.pdb
 
+# PDF (es. materiale del progetto, non file sorgente)
+*.pdf
+
 # Variabili d'ambiente / segreti locali (es. credenziali DB, se il server ne avrà)
 .env
 .env.*
+
+# Storage utenti del server (credenziali registrate, dati locali di sviluppo)
+users.json
 
 # Editor / IDE
 .vscode/

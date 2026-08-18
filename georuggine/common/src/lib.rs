@@ -37,6 +37,10 @@ pub enum ServerMessage {
     LoginOk,
     /// Login fallito, con motivo leggibile da mostrare all'utente.
     LoginErr(String),
+    /// Registrazione riuscita.
+    RegisterOk,
+    /// Registrazione fallita (es. username già in uso), con motivo leggibile.
+    RegisterErr(String),
     /// Messaggio di chat inviato a tutti gli utenti connessi.
     Broadcast { from: String, text: String },
     /// Messaggio di chat privato a un singolo utente.

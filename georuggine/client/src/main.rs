@@ -9,6 +9,19 @@ async fn main() -> io::Result<()> {
 
     send_message(
         &mut stream,
+        &ClientMessage::Register {
+            username: "test1".into(),
+            password: "pw".into(),
+        },
+    )
+    .await?;
+
+    let resp: ServerMessage = read_message(&mut stream).await?;
+    println!("{:?}", resp);
+
+
+    send_message(
+        &mut stream,
         &ClientMessage::Login {
             username: "test1".into(),
             password: "pw".into(),
@@ -18,9 +31,6 @@ async fn main() -> io::Result<()> {
 
     let resp: ServerMessage = read_message(&mut stream).await?;
     println!("{:?}", resp);
-    println!("diocane");
-
-    send_message(&mut stream, &ClientMessage::PositionUpdate { lat: 6.7, lon: 4.20, timestamp: 6767 }).await?;
 
     Ok(())
 }
