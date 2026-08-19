@@ -26,8 +26,14 @@ pub enum ClientMessage {
     Register { username: String, password: String },
     /// Aggiornamento periodico della posizione geografica del client.
     PositionUpdate { lat: f64, lon: f64, timestamp: i64 },
-    /// Messaggio di chat da inoltrare (il server decide a chi: broadcast o diretto).
+    /// Messaggio di chat da inoltrare in broadcast a tutti gli utenti connessi
+    /// (tranne il mittente).
     ChatToServer { text: String },
+    /// Messaggio di chat privato per un singolo utente, identificato per
+    /// username. Il server verifica che `to` sia connesso e lo inoltra come
+    /// [`ServerMessage::Direct`]; se non lo è, risponde con
+    /// [`ServerMessage::DirectErr`].
+    ChatDirect { to: String, text: String },
 }
 
 /// Messaggi che il server può inviare al client.
@@ -45,6 +51,10 @@ pub enum ServerMessage {
     Broadcast { from: String, text: String },
     /// Messaggio di chat privato a un singolo utente.
     Direct { from: String, text: String },
+    /// Errore di consegna per un [`ClientMessage::ChatDirect`]: il
+    /// destinatario non esiste, non è connesso, o l'invio è comunque
+    /// fallito. Torna solo al mittente, non è mai vista da terzi.
+    DirectErr(String),
     /// Notifica che lo stato di un utente è cambiato (es. per aggiornare la UI degli altri client).
     StateChanged { username: String, new_state: UserState },
 }

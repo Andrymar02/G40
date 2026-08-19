@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 common = { path = "../common" }
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
