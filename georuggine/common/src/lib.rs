@@ -26,14 +26,11 @@ pub enum ClientMessage {
     Register { username: String, password: String },
     /// Aggiornamento periodico della posizione geografica del client.
     PositionUpdate { lat: f64, lon: f64, timestamp: i64 },
-    /// Messaggio di chat da inoltrare in broadcast a tutti gli utenti connessi
-    /// (tranne il mittente).
+    /// Messaggio di testo per il server. NON viene rimbalzato ad altri
+    /// utenti: la consegna descrive solo client->server (questo) e
+    /// server->client in broadcast o diretto ([`ServerMessage::Broadcast`]/
+    /// [`ServerMessage::Direct`]), non una chat instradata tra utenti.
     ChatToServer { text: String },
-    /// Messaggio di chat privato per un singolo utente, identificato per
-    /// username. Il server verifica che `to` sia connesso e lo inoltra come
-    /// [`ServerMessage::Direct`]; se non lo è, risponde con
-    /// [`ServerMessage::DirectErr`].
-    ChatDirect { to: String, text: String },
 }
 
 /// Messaggi che il server può inviare al client.
@@ -49,14 +46,15 @@ pub enum ServerMessage {
     RegisterErr(String),
     /// Messaggio di chat inviato a tutti gli utenti connessi.
     Broadcast { from: String, text: String },
-    /// Messaggio di chat privato a un singolo utente.
+    /// Messaggio di testo diretto a un singolo utente, inviato su decisione
+    /// del server (es. un operatore alla console del server), non su
+    /// richiesta di un altro utente.
     Direct { from: String, text: String },
-    /// Errore di consegna per un [`ClientMessage::ChatDirect`]: il
-    /// destinatario non esiste, non è connesso, o l'invio è comunque
-    /// fallito. Torna solo al mittente, non è mai vista da terzi.
-    DirectErr(String),
     /// Notifica che lo stato di un utente è cambiato (es. per aggiornare la UI degli altri client).
-    StateChanged { username: String, new_state: UserState },
+    StateChanged {
+        username: String,
+        new_state: UserState,
+    },
 }
 
 /// Stato di un utente lato server, replicato ai client interessati.
@@ -81,7 +79,7 @@ pub enum UserState {
 /// usare `tokio::net::TcpStream` e girare dentro un runtime tokio
 /// (`#[tokio::main]`).
 pub mod framing {
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::{Serialize, de::DeserializeOwned};
     use std::io;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -156,7 +154,6 @@ pub mod framing {
         stream.read_exact(&mut payload).await?;
 
         Ok(serde_json::from_slice(&payload)?)
-
     }
 }
 
@@ -178,7 +175,11 @@ mod tests {
         let decoded: ClientMessage = framing::read_message(&mut rx).await.unwrap();
 
         match decoded {
-            ClientMessage::PositionUpdate { lat, lon, timestamp } => {
+            ClientMessage::PositionUpdate {
+                lat,
+                lon,
+                timestamp,
+            } => {
                 assert_eq!(lat, 45.07);
                 assert_eq!(lon, 7.68);
                 assert_eq!(timestamp, 1_755_000_000);
@@ -200,7 +201,10 @@ mod tests {
         let decoded: ServerMessage = framing::read_message(&mut rx).await.unwrap();
 
         match decoded {
-            ServerMessage::StateChanged { username, new_state } => {
+            ServerMessage::StateChanged {
+                username,
+                new_state,
+            } => {
                 assert_eq!(username, "alice");
                 assert_eq!(new_state, UserState::Moving);
             }
