@@ -1,3 +1,5 @@
+mod analytics;
 mod model;
 
-pub use model::{GeoPoint, GeoPointError, PositionSample};
+pub use analytics::consecutive_segments;
+pub use model::{GeoPoint, GeoPointError, MovementSegment, PositionSample};

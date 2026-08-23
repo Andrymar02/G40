@@ -37,6 +37,10 @@ impl GeoPoint {
     }
 }
 
+/// Posizione ricevuta dal server.
+///
+/// received_at è il timestamp del server usato per l'ordinamento.
+/// client_timestamp è opzionale e proviene dal client.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PositionSample {
     username: String,
@@ -81,6 +85,64 @@ impl PositionSample {
 
     pub fn client_timestamp(&self) -> Option<i64> {
         self.client_timestamp
+    }
+}
+
+/// Movimento tra due posizioni consecutive della stessa sessione.
+///
+/// I segmenti prodotti dall'analisi hanno timestamp strettamente crescenti.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MovementSegment {
+    session_id: i64,
+    start: GeoPoint,
+    end: GeoPoint,
+    started_at: i64,
+    ended_at: i64,
+}
+
+impl MovementSegment {
+    /// pub(crate) === new può essere chiamato soltanto all'interno di questo crate (server)
+    /// i moduli esterni possono leggere il segmento ma non possono crearne uno arbitrariamente
+    pub(crate) fn new(
+        session_id: i64,
+        start: GeoPoint,
+        end: GeoPoint,
+        started_at: i64,
+        ended_at: i64,
+    ) -> Self {
+        Self {
+            session_id,
+            start,
+            end,
+            started_at,
+            ended_at,
+        }
+    }
+
+    pub fn session_id(&self) -> i64 {
+        self.session_id
+    }
+
+    pub fn start(&self) -> GeoPoint {
+        self.start
+    }
+
+    pub fn end(&self) -> GeoPoint {
+        self.end
+    }
+
+    pub fn started_at(&self) -> i64 {
+        self.started_at
+    }
+
+    pub fn ended_at(&self) -> i64 {
+        self.ended_at
+    }
+
+    pub fn duration_seconds(&self) -> i64 {
+        // durata calcolata ogni volta (non vedo il senso nel salvarla)
+        self.ended_at - self.started_at
     }
 }
 
