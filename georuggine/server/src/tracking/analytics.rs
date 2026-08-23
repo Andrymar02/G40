@@ -1,9 +1,12 @@
 use super::{MovementSegment, PositionSample};
 
+/// Intervallo massimo osservabile tra due campioni consecutivi
+pub const MAX_GAP_SECONDS: i64 = 75;
+
 /// Costruisce segmenti tra campioni adiacenti nell'ordine ricevuto.
 ///
-/// Scarta le coppie con session_id diverso o con received_at
-/// non strettamente crescente. ATTENZIONE: La funzione non riordina i campioni.
+/// Scarta le coppie con sessione diversa, timestamp non crescente
+/// o gap superiore a [`MAX_GAP_SECONDS`]. ATTENZIONE: Non riordina i campioni.
 pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> {
     let mut segments = Vec::new();
 
@@ -12,6 +15,12 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
         let end = &coppia[1];
 
         if start.session_id() != end.session_id() || end.received_at() <= start.received_at() {
+            continue;
+        }
+
+        let gap_seconds = end.received_at() - start.received_at();
+
+        if gap_seconds > MAX_GAP_SECONDS {
             continue;
         }
 
@@ -29,7 +38,7 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
 
 #[cfg(test)]
 mod tests {
-    use super::consecutive_segments;
+    use super::{MAX_GAP_SECONDS, consecutive_segments};
     use crate::tracking::{GeoPoint, PositionSample};
 
     fn sample(session_id: i64, lat: f64, lon: f64, received_at: i64) -> PositionSample {
@@ -135,5 +144,32 @@ mod tests {
         assert_eq!(segments[1].session_id(), 21);
         assert_eq!(segments[1].started_at(), 140);
         assert_eq!(segments[1].ended_at(), 170);
+    }
+
+    #[test]
+    fn gap_longer_than_max_produces_no_segment() {
+        let started_at = 100;
+
+        let samples = vec![
+            sample(13, 45.0000, 7.0000, started_at),
+            sample(13, 45.1000, 7.1000, started_at + MAX_GAP_SECONDS + 1),
+        ];
+
+        assert!(consecutive_segments(&samples).is_empty());
+    }
+
+    #[test]
+    fn gap_equal_to_max_produces_segment() {
+        let started_at = 100;
+
+        let samples = vec![
+            sample(13, 45.0000, 7.0000, started_at),
+            sample(13, 45.1000, 7.1000, started_at + MAX_GAP_SECONDS),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].duration_seconds(), MAX_GAP_SECONDS);
     }
 }
