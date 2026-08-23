@@ -61,3 +61,70 @@ impl UserStore {
         tokio::fs::write(&self.path, json).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Percorso temporaneo univoco per non far collidere i test tra loro
+    /// (girano in parallelo) ne' con `users.json` usato dal server vero.
+    fn temp_path(name: &str) -> String {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("georuggine_test_{name}_{unique}.json"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[tokio::test]
+    async fn register_then_verify_succeeds() {
+        let path = temp_path("register_verify");
+        let users = UserStore::load(&path);
+
+        let result = users.register("alice", "password123").await;
+        assert!(result.is_ok());
+
+        assert!(users.verify("alice", "password123").await);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn register_duplicate_username_fails() {
+        let path = temp_path("duplicate");
+        let users = UserStore::load(&path);
+
+        assert!(users.register("bob", "pw1").await.is_ok());
+        // Stesso username, anche con password diversa: deve fallire.
+        let result = users.register("bob", "pw2").await;
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_wrong_password() {
+        let path = temp_path("wrong_password");
+        let users = UserStore::load(&path);
+
+        users.register("carol", "correct-password").await.unwrap();
+
+        assert!(!users.verify("carol", "wrong-password").await);
+        assert!(!users.verify("utente-inesistente", "qualsiasi").await);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn load_from_nonexistent_file_starts_empty() {
+        let path = temp_path("nonexistent");
+        // Non creiamo il file: `load` deve partire da una mappa vuota
+        // invece di fallire l'avvio del server.
+        let users = UserStore::load(&path);
+
+        assert!(!users.verify("chiunque", "qualsiasi").await);
+    }
+}

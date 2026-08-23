@@ -30,7 +30,7 @@ georuggine/
 - **`ServerMessage`**: `LoginOk`, `LoginErr`, `RegisterOk`, `RegisterErr`, `Broadcast { from, text }`, `Direct { from, text }`, `StateChanged { username, new_state }`.
 - **`UserState`**: `Disconnected`, `Idle`, `Moving`.
 - **Modulo `framing`**: serializzazione JSON + framing *length-prefixed* su TCP (4 byte di lunghezza big-endian + payload), asincrono. Cap `MAX_MESSAGE_SIZE` (1 MiB) contro payload dichiarati enormi.
-- 3 test automatici — `cargo test -p common`.
+- **Test Automatici:** La suite di test copre ora il protocollo (framing), la macchina a stati (transizioni, validazione e disconnessione tramite orologio simulato) e l'autenticazione (registrazione, login, credenziali errate e duplicati). Puoi lanciarli con `cargo test --workspace`.
 
 Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimbalzato ad altri utenti) e server→client in broadcast o diretto (decisi dal server, non da un client che indica un destinatario — vedi console operatore sotto).
 
@@ -110,7 +110,7 @@ Vedi `ORGANIZZAZIONE.md` per il piano completo. In sintesi, restano tre aree ind
 
 - **Storico posizioni e analisi movimento** (tragitto, velocità media, durata movimento/pause, su giorno/settimana/mese) — non iniziato, proprietà di Viorel.
 - **Requisiti non funzionali**: log CPU ogni 2 minuti, build/misure su una seconda piattaforma, dimensione eseguibili — non iniziato, proprietà di Alice.
-- **Lato server**: sessioni robuste contro doppio login con lo stesso username, hashing password, persistenza atomica dello storage utenti, comandi aggiuntivi alla console (`/all`, `/to`, `/stats`, `/users`) — proprietà di Francesco.
+- **Lato server**: gestione sessioni per evitare login simultanei, hashing password, persistenza atomica dello storage utenti, comandi aggiuntivi alla console (/all, /to, /stats, /users) — proprietà di Francesco.
 
 **Decisioni ancora aperte, da discutere come gruppo:**
 - Sicurezza del trasporto (TLS?) — al momento tutto viaggia in chiaro, incluse le password nel messaggio `Login`.
