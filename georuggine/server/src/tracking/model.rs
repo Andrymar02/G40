@@ -1,3 +1,6 @@
+/// Distanza oltre la quale una posizione è considerata cambiata
+pub const MOVEMENT_THRESHOLD_METERS: f64 = 1.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoPointError {
     NonFinite,
@@ -99,6 +102,7 @@ pub struct MovementSegment {
     end: GeoPoint,
     started_at: i64,
     ended_at: i64,
+    distance_meters: f64,
 }
 
 impl MovementSegment {
@@ -110,6 +114,7 @@ impl MovementSegment {
         end: GeoPoint,
         started_at: i64,
         ended_at: i64,
+        distance_meters: f64,
     ) -> Self {
         Self {
             session_id,
@@ -117,6 +122,7 @@ impl MovementSegment {
             end,
             started_at,
             ended_at,
+            distance_meters,
         }
     }
 
@@ -143,6 +149,14 @@ impl MovementSegment {
     pub fn duration_seconds(&self) -> i64 {
         // durata calcolata ogni volta (non vedo il senso nel salvarla)
         self.ended_at - self.started_at
+    }
+
+    pub fn distance_meters(&self) -> f64 {
+        self.distance_meters
+    }
+
+    pub fn changed_position(&self) -> bool {
+        self.distance_meters > MOVEMENT_THRESHOLD_METERS
     }
 }
 
@@ -220,5 +234,14 @@ mod tests {
 
         assert_eq!(sample.client_timestamp(), None);
         assert_eq!(sample.received_at(), 1_755_000_010);
+    }
+
+    #[test]
+    fn movement_at_threshold_is_not_movement() {
+        let point = GeoPoint::try_new(45.0628, 7.7620).unwrap();
+
+        let segment = MovementSegment::new(13, point, point, 100, 130, MOVEMENT_THRESHOLD_METERS);
+
+        assert!(!segment.changed_position());
     }
 }

@@ -47,12 +47,18 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
             continue;
         }
 
+        let start_point = start.point();
+        let end_point = end.point();
+
+        let distance_meters = haversine_distance(start_point, end_point);
+
         segments.push(MovementSegment::new(
             start.session_id(),
-            start.point(),
-            end.point(),
+            start_point,
+            end_point,
             start.received_at(),
             end.received_at(),
+            distance_meters,
         ));
     }
 
@@ -103,6 +109,10 @@ mod tests {
         assert_eq!(segment.started_at(), 100);
         assert_eq!(segment.ended_at(), 130);
         assert_eq!(segment.duration_seconds(), 30);
+
+        let expected_distance = haversine_distance(segment.start(), segment.end());
+
+        assert!((segment.distance_meters() - expected_distance).abs() < 0.000_001);
     }
 
     // testiamo che due sessioni differenti non vengano collegate
@@ -226,5 +236,60 @@ mod tests {
         let expected = EARTH_RADIUS_METERS * PI / 2.0;
 
         assert!((distance - expected).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn unchanged_position_is_not_movement() {
+        let samples = vec![
+            sample(13, 45.0628, 7.7620, 100),
+            sample(13, 45.0628, 7.7620, 130),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 1);
+
+        let segment = segments[0];
+
+        assert_eq!(segment.distance_meters(), 0.0);
+        assert!(!segment.changed_position());
+    }
+
+    #[test]
+    fn movement_over_threshold_is_movement() {
+        let two_meters_in_degrees = (2.0 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, two_meters_in_degrees, 130),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 1);
+
+        let segment = segments[0];
+
+        assert!((segment.distance_meters() - 2.0).abs() < 0.000_001);
+        assert!(segment.changed_position());
+    }
+
+    #[test]
+    fn movement_below_threshold_is_not_movement() {
+        let half_meter_in_degrees = (0.5 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, half_meter_in_degrees, 130),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 1);
+
+        let segment = segments[0];
+
+        assert!((segment.distance_meters() - 0.5).abs() < 0.000_001);
+        assert!(!segment.changed_position());
     }
 }
