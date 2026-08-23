@@ -1,7 +1,30 @@
-use super::{MovementSegment, PositionSample};
+use super::{GeoPoint, MovementSegment, PositionSample};
 
 /// Intervallo massimo osservabile tra due campioni consecutivi
 pub const MAX_GAP_SECONDS: i64 = 75;
+/// Raggio terrestre medio usato dal modello sferico
+const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
+
+/// Calcola in metri la distanza sulla superficie terrestre tra due punti.
+pub fn haversine_distance(start: GeoPoint, end: GeoPoint) -> f64 {
+    let start_lat = start.lat().to_radians();
+    let end_lat = end.lat().to_radians();
+
+    let delta_lat = (end.lat() - start.lat()).to_radians();
+    let delta_lon = (end.lon() - start.lon()).to_radians();
+
+    let sin_half_lat = (delta_lat / 2.0).sin();
+    let sin_half_lon = (delta_lon / 2.0).sin();
+
+    let haversine = sin_half_lat.powi(2) + start_lat.cos() * end_lat.cos() * sin_half_lon.powi(2);
+
+    // Contiene eventuali errori di arrotondamento nell'intervallo valido.
+    let haversine = haversine.clamp(0.0, 1.0);
+
+    let central_angle = 2.0 * haversine.sqrt().atan2((1.0 - haversine).sqrt());
+
+    EARTH_RADIUS_METERS * central_angle
+}
 
 /// Costruisce segmenti tra campioni adiacenti nell'ordine ricevuto.
 ///
@@ -38,8 +61,9 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_GAP_SECONDS, consecutive_segments};
+    use super::{EARTH_RADIUS_METERS, MAX_GAP_SECONDS, consecutive_segments, haversine_distance};
     use crate::tracking::{GeoPoint, PositionSample};
+    use std::f64::consts::PI;
 
     fn sample(session_id: i64, lat: f64, lon: f64, received_at: i64) -> PositionSample {
         PositionSample::new(
@@ -171,5 +195,36 @@ mod tests {
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].duration_seconds(), MAX_GAP_SECONDS);
+    }
+
+    #[test]
+    fn same_point_has_zero_distance() {
+        let point = GeoPoint::try_new(45.0628, 7.7620).unwrap();
+
+        let distance = haversine_distance(point, point);
+
+        assert_eq!(distance, 0.0);
+    }
+
+    #[test]
+    fn quarter_equator_is_quarter_circumference() {
+        let start = GeoPoint::try_new(0.0, 0.0).unwrap();
+        let end = GeoPoint::try_new(0.0, 90.0).unwrap();
+
+        let distance = haversine_distance(start, end);
+        let expected = EARTH_RADIUS_METERS * PI / 2.0;
+
+        assert!((distance - expected).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn equator_to_north_pole_is_quarter_circumference() {
+        let start = GeoPoint::try_new(0.0, 0.0).unwrap();
+        let end = GeoPoint::try_new(90.0, 0.0).unwrap();
+
+        let distance = haversine_distance(start, end);
+        let expected = EARTH_RADIUS_METERS * PI / 2.0;
+
+        assert!((distance - expected).abs() < 0.000_001);
     }
 }
