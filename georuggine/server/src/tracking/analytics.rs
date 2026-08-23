@@ -3,8 +3,7 @@ use super::{MovementSegment, PositionSample};
 /// Costruisce segmenti tra campioni adiacenti nell'ordine ricevuto.
 ///
 /// Scarta le coppie con session_id diverso o con received_at
-/// non strettamente crescente. 
-/// ATTENZIONE: La funzione non riordina i campioni.
+/// non strettamente crescente. ATTENZIONE: La funzione non riordina i campioni.
 pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> {
     let mut segments = Vec::new();
 
@@ -26,10 +25,6 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
     }
 
     segments
-
-    // if samples.len() < 2 {
-    //     return Vec::new();
-    // }
 }
 
 #[cfg(test)]
@@ -77,7 +72,7 @@ mod tests {
         assert_eq!(segment.duration_seconds(), 30);
     }
 
-    /// testiamo che due sessioni differenti non vengano collegate
+    // testiamo che due sessioni differenti non vengano collegate
     #[test]
     fn does_not_connect_different_sessions() {
         let samples = vec![
@@ -91,7 +86,7 @@ mod tests {
     /// timestamp uguali devono produrre durata zero
     /// timestamp negativi producono durata negativa :
     #[test]
-    fn does_not_create_not_increasing_segments() {
+    fn does_not_create_non_increasing_segments() {
         for timestamp in [100, 90] {
             let samples = vec![
                 sample(13, 45.0628, 7.7620, 100),
@@ -103,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn three_samples_produces_two_segments() {
+    fn three_samples_produce_two_segments() {
         let samples = vec![
             sample(13, 44.0000, 7.0000, 100),
             sample(13, 44.5000, 7.5000, 130),
