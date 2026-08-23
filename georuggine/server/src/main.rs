@@ -1,65 +1,160 @@
+mod state;
+mod users;
+
 use common::framing;
 use common::{ClientMessage, ServerMessage};
+use state::{Positions, SharedClock, SystemClock};
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use users::Users;
 
-/// Nota: nello scheletro proposto la mappa condivisa è `HashMap<String,
-/// TcpStream>`. Un `TcpStream` intero non si può però tenere sia nel task
-/// che lo legge (`handle_client`) sia nella mappa condivisa da cui altri
-/// task scrivono: sarebbero due proprietari dello stesso valore. Per far
-/// girare lo scheletro si è quindi usato `socket.into_split()`, tenendo la
-/// metà di lettura nel task del client e mettendo solo la metà di
-/// scrittura nella mappa.
+/// File in cui persistono le credenziali registrate (JSON, vedi `users`).
+/// Percorso relativo alla working directory da cui si lancia `cargo run -p
+/// server` (di norma la radice del workspace).
+const USERS_FILE: &str = "users.json";
+
+/// Indirizzo:porta di bind di default, usato se non se ne passa uno da riga
+/// di comando (`cargo run -p server -- <indirizzo:porta>`).
+const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+
+/// Capacità del channel per-client: quanti `ServerMessage` possono restare
+/// in coda prima che chi manda (`send_to`/`broadcast`) resti in attesa sul
+/// `.send().await`. Un valore arbitrario per questa fase; da rivedere in
+/// base al traffico reale.
+const CLIENT_CHANNEL_CAPACITY: usize = 32;
+
+/// Pattern attore: ogni client è raggiungibile tramite il `Sender` della sua
+/// coda di messaggi in uscita, non più tramite la sua `OwnedWriteHalf`
+/// diretta. Chi vuole scrivere a un client fa `sender.send(msg).await`:
+/// nessun lock condiviso viene tenuto durante l'I/O di rete, solo durante
+/// la lookup/clone del sender nella mappa.
 ///
-/// PROBLEMA (quello segnalato nella nota): per scrivere a un client
-/// bisogna comunque fare il lock dell'intera `Mutex<HashMap<...>>` e
-/// tenerlo per la durata di una `.await` di rete (vedi `send_to` e
-/// `broadcast`). Con più client questo serializza tutte le scritture e
-/// blocca anche i client che non c'entrano nulla con quel messaggio. È
-/// esattamente il motivo per cui in Fase 2 va sostituito con un
-/// `mpsc::Sender<ServerMessage>` per client (pattern "attore"): ogni client
-/// avrebbe il proprio task che possiede la sua write-half e riceve i
-/// messaggi da inoltrare via channel, senza lock condivisi sull'I/O.
-type Clients = Arc<Mutex<HashMap<String, OwnedWriteHalf>>>;
+/// `pub(crate)` perché `state.rs` (la macchina a stati) deve poterla usare
+/// per notificare `StateChanged` agli altri client connessi.
+pub(crate) type Clients = Arc<Mutex<HashMap<String, mpsc::Sender<ServerMessage>>>>;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    // Indirizzo:porta configurabile da riga di comando, con default se
+    // omesso — utile per far girare più server sulla stessa macchina
+    // durante i test, o per un ambiente diverso da quello locale.
+    let bind_addr = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
+
+    let listener = TcpListener::bind(&bind_addr).await?;
     let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
+    let users: Users = users::UserStore::load(USERS_FILE);
+    let positions: Positions = state::new_positions();
+    let clock: SharedClock = Arc::new(SystemClock);
 
-    println!("Server in ascolto su 0.0.0.0:8080");
+    println!("Server in ascolto su {bind_addr}");
 
-    loop {
-        let (socket, addr) = listener.accept().await?;
+    // Il loop di accept gira in un task a parte: il task principale resta
+    // libero per la console dell'operatore (broadcast/diretto), che deve
+    // poter leggere da stdin senza aspettare nuove connessioni.
+    {
         let clients = clients.clone();
-        println!("{:?} {:?}", socket, addr);
+        let users = users.clone();
+        let positions = positions.clone();
+        let clock = clock.clone();
         tokio::spawn(async move {
-            handle_client(socket, addr, clients).await;
+            loop {
+                let (socket, addr) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        println!("errore in accept: {e}");
+                        continue;
+                    }
+                };
+                let clients = clients.clone();
+                let users = users.clone();
+                let positions = positions.clone();
+                let clock = clock.clone();
+                println!("{:?} {:?}", socket, addr);
+                tokio::spawn(async move {
+                    handle_client(socket, addr, clients, users, positions, clock).await;
+                });
+            }
         });
+    }
+
+    admin_console(clients).await;
+    Ok(())
+}
+
+/// Console dell'operatore lato server: legge righe da stdin del processo
+/// server (non della rete) e decide se mandarle in broadcast o a un singolo
+/// utente. È l'unica sorgente di `ServerMessage::Broadcast`/`Direct`: per
+/// consegna, la scelta broadcast-vs-diretto spetta al server, non a un
+/// client che indica un destinatario (i messaggi che i client mandano con
+/// `ChatToServer` restano infatti solo lato server, vedi `handle_client`).
+async fn admin_console(clients: Clients) {
+    println!("Console operatore: testo libero = broadcast, '/msg <utente> <testo>' = diretto.");
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("/msg ") {
+            match rest.split_once(' ') {
+                Some((to, text)) if !text.is_empty() => direct_message(&clients, to, text).await,
+                _ => println!("Uso: /msg <utente> <testo>"),
+            }
+        } else {
+            broadcast(&clients, line).await;
+        }
     }
 }
 
-async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) {
+/// Task dedicato alla scrittura verso un client: è l'unico proprietario
+/// della sua `write_half`, quindi le scritture non contendono mai un lock
+/// condiviso. Riceve i messaggi da spedire dal channel `rx` e termina
+/// quando tutti i `Sender` clonati vengono droppati (client rimosso dalla
+/// mappa) o quando la scrittura sul socket fallisce.
+async fn writer_task(
+    mut write_half: OwnedWriteHalf,
+    mut rx: mpsc::Receiver<ServerMessage>,
+    addr: SocketAddr,
+) {
+    while let Some(msg) = rx.recv().await {
+        if let Err(e) = framing::send_message(&mut write_half, &msg).await {
+            println!("[{addr}] invio fallito: {e}");
+            break;
+        }
+    }
+}
+
+async fn handle_client(
+    socket: TcpStream,
+    addr: SocketAddr,
+    clients: Clients,
+    users: Users,
+    positions: Positions,
+    clock: SharedClock,
+) {
     let (mut read_half, write_half) = socket.into_split();
 
-    // La write-half viene spostata nella mappa condivisa al momento del
-    // login (vedi sotto); fino ad allora resta qui, `Some`.
-    let mut write_half = Some(write_half);
-    // Username noto solo dopo un Login riuscito.
-    // PROBLEMA: prima del login il client non è registrato nella mappa,
-    // quindi non è ancora raggiungibile da nessuno (né broadcast né
-    // messaggi diretti) — accettabile per uno scheletro, da rivedere
-    // quando si implementerà l'auth vera.
+    let (tx, rx) = mpsc::channel::<ServerMessage>(CLIENT_CHANNEL_CAPACITY);
+    tokio::spawn(writer_task(write_half, rx, addr));
+
+    // Username noto solo dopo un Login riuscito; usato anche come guard
+    // contro un secondo Login sulla stessa connessione.
     let mut username: Option<String> = None;
 
     loop {
         let msg: ClientMessage = match framing::read_message(&mut read_half).await {
             Ok(msg) => msg,
+            // uscita dal loop handle avviene qui quando altro lato tcp si stacca (client)
             Err(e) => {
                 println!("[{addr}] connessione chiusa o errore di lettura: {e}");
                 break;
@@ -67,42 +162,64 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) {
         };
 
         match msg {
-            ClientMessage::Login { username: u, password: _ } => {
-                // PROBLEMA: nessuna verifica reale della password e nessun
-                // controllo di username duplicati (un secondo login con lo
-                // stesso username sovrascrive silenziosamente il primo
-                // nella mappa) — manca uno storage utenti, fuori scope per
-                // questo scheletro. Qui si accetta sempre.
-                match write_half.take() {
-                    Some(w) => {
-                        println!("[{addr}] login: {u}");
-                        clients.lock().await.insert(u.clone(), w);
-                        username = Some(u.clone());
-                        send_to(&clients, &u, &ServerMessage::LoginOk).await;
-                    }
-                    None => {
-                        // Già loggato in questa stessa connessione: ignora.
-                        println!("[{addr}] login ripetuto ignorato");
-                    }
+            ClientMessage::Login {
+                username: u,
+                password: p,
+            } => {
+                if username.is_some() {
+                    // Già loggato in questa stessa connessione: ignora.
+                    println!("[{addr}] login ripetuto ignorato");
+                } else if users.verify(&u, &p).await {
+                    println!("[{addr}] login: {u}");
+                    clients.lock().await.insert(u.clone(), tx.clone());
+                    username = Some(u.clone());
+                    let _ = tx.send(ServerMessage::LoginOk).await;
+                } else {
+                    println!("[{addr}] login fallito: {u}");
+                    let _ = tx
+                        .send(ServerMessage::LoginErr(
+                            "credenziali non valide".to_string(),
+                        ))
+                        .await;
                 }
             }
-            ClientMessage::Register { username: u, password: _ } => {
-                // PROBLEMA: nessuna persistenza reale, "registrare" qui non
-                // fa altro che loggare la richiesta. Da collegare a uno
-                // storage utenti quando esisterà (fuori scope Fase 1).
-                println!("[{addr}] register: {u}");
-            }
-            ClientMessage::PositionUpdate { lat, lon, timestamp } => {
+            ClientMessage::Register {
+                username: u,
+                password: p,
+            } => match users.register(&u, &p).await {
+                Ok(()) => {
+                    println!("[{addr}] registrazione: {u}");
+                    let _ = tx.send(ServerMessage::RegisterOk).await;
+                }
+                Err(reason) => {
+                    println!("[{addr}] registrazione fallita per {u}: {reason}");
+                    let _ = tx.send(ServerMessage::RegisterErr(reason)).await;
+                }
+            },
+            ClientMessage::PositionUpdate {
+                lat,
+                lon,
+                timestamp,
+            } => {
+                // `timestamp` è quello dichiarato dal client: loggato per
+                // debug, ma la macchina a stati (in `state::update_position`)
+                // non lo usa più per le transizioni — vedi commento su
+                // `state::Clock`. Resta nel protocollo perché potrà servire
+                // allo storico posizioni (Viorel).
                 println!("[{addr}] posizione: ({lat}, {lon}) @ {timestamp}");
-                // PROBLEMA: qui andrebbe calcolato/aggiornato lo UserState
-                // e spedito un ServerMessage::StateChanged agli altri
-                // client interessati. Non implementato in questo
-                // scheletro: la logica di stato (quando si passa da Idle a
-                // Moving, ecc.) va decisa come gruppo prima di scriverla.
+                match &username {
+                    Some(u) => {
+                        state::update_position(&clients, &positions, &clock, u, lat, lon).await;
+                    }
+                    None => println!("[{addr}] posizione ignorata: utente non loggato"),
+                }
             }
             ClientMessage::ChatToServer { text } => match &username {
-                Some(u) => broadcast(&clients, u, &text).await,
-                None => println!("[{addr}] chat ignorata: utente non loggato"),
+                // Solo ricevuto e loggato: la consegna non chiede che un
+                // messaggio mandato da un utente venga girato ad altri
+                // utenti, quindi qui non c'è nessun broadcast/inoltro.
+                Some(u) => println!("[{addr}] messaggio da {u}: {text}"),
+                None => println!("[{addr}] messaggio ignorato: utente non loggato"),
             },
         }
     }
@@ -110,45 +227,60 @@ async fn handle_client(socket: TcpStream, addr: SocketAddr, clients: Clients) {
     if let Some(u) = username {
         clients.lock().await.remove(&u);
         println!("[{addr}] disconnesso: {u}");
+        state::mark_disconnected(&clients, &positions, &u).await;
     }
 }
 
-/// Invia `msg` a un singolo client cercandolo per username nella mappa
-/// condivisa.
+/// Manda un messaggio di testo in broadcast a tutti i client connessi.
+/// Chiamata solo dalla console dell'operatore (`admin_console`): è il
+/// server stesso il mittente, non un client che chiede di essere rimbalzato
+/// ad altri.
 ///
-/// PROBLEMA: il lock resta preso per tutta la durata della `write_all`
-/// dentro `send_message` (una `.await` di rete) — vedi il commento su
-/// `Clients` in testa al file.
-async fn send_to(clients: &Clients, username: &str, msg: &ServerMessage) {
-    let mut guard = clients.lock().await;
-    if let Some(write_half) = guard.get_mut(username) {
-        if let Err(e) = framing::send_message(write_half, msg).await {
-            println!("invio a {username} fallito: {e}");
-        }
-    }
-}
+/// Il lock su `clients` è tenuto solo per clonare i `Sender`; l'invio ai
+/// singoli client (e l'eventuale attesa per backpressure) avviene dopo
+/// averlo rilasciato, così un client lento non blocca l'inserimento/rimozione
+/// di altri client nella mappa.
+async fn broadcast(clients: &Clients, text: &str) {
+    let senders: Vec<(String, mpsc::Sender<ServerMessage>)> = {
+        let guard = clients.lock().await;
+        guard
+            .iter()
+            .map(|(username, sender)| (username.clone(), sender.clone()))
+            .collect()
+    };
 
-/// Inoltra un messaggio di chat a tutti i client connessi tranne il
-/// mittente (broadcast).
-///
-/// PROBLEMA: stesso discorso di `send_to`, amplificato — il lock resta
-/// preso mentre si scrive in sequenza a *tutti* i client, quindi un client
-/// lento a leggere rallenta l'invio a tutti gli altri. Nello scheletro va
-/// bene per validare che il giro client→server→client funzioni; è il primo
-/// candidato a essere rifatto col pattern attore (mpsc per client).
-async fn broadcast(clients: &Clients, from: &str, text: &str) {
-    let mut guard = clients.lock().await;
-    for (username, write_half) in guard.iter_mut() {
-        if username == from {
-            continue;
-        }
+    for (username, sender) in senders {
         let msg = ServerMessage::Broadcast {
-            from: from.to_string(),
+            from: "server".to_string(),
             text: text.to_string(),
         };
-        if let Err(e) = framing::send_message(write_half, &msg).await {
-            println!("invio a {username} fallito: {e}");
+        if sender.send(msg).await.is_err() {
+            println!("invio a {username} fallito: canale chiuso");
         }
     }
+}
 
+/// Manda un messaggio di testo a un solo utente (`to`), se connesso.
+/// Come `broadcast`, chiamata solo da `admin_console`: è il server a
+/// scegliere il destinatario, non un client. Eventuali errori (utente non
+/// connesso, canale chiuso) restano lato server: non c'è nessun client
+/// "mittente" a cui rispedirli.
+async fn direct_message(clients: &Clients, to: &str, text: &str) {
+    let target = {
+        let guard = clients.lock().await;
+        guard.get(to).cloned()
+    };
+
+    match target {
+        Some(target_tx) => {
+            let msg = ServerMessage::Direct {
+                from: "server".to_string(),
+                text: text.to_string(),
+            };
+            if target_tx.send(msg).await.is_err() {
+                println!("invio a {to} fallito: canale chiuso");
+            }
+        }
+        None => println!("utente '{to}' non connesso"),
+    }
 }
