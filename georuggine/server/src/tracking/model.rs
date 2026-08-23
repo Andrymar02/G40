@@ -37,6 +37,53 @@ impl GeoPoint {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionSample {
+    username: String,
+    session_id: i64,
+    point: GeoPoint,
+    received_at: i64,
+    client_timestamp: Option<i64>,
+}
+
+impl PositionSample {
+    pub fn new(
+        username: String,
+        session_id: i64,
+        point: GeoPoint,
+        received_at: i64,
+        client_timestamp: Option<i64>,
+    ) -> Self {
+        Self {
+            username,
+            session_id,
+            point,
+            received_at,
+            client_timestamp,
+        }
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn session_id(&self) -> i64 {
+        self.session_id
+    }
+
+    pub fn point(&self) -> GeoPoint {
+        self.point
+    }
+
+    pub fn received_at(&self) -> i64 {
+        self.received_at
+    }
+
+    pub fn client_timestamp(&self) -> Option<i64> {
+        self.client_timestamp
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +128,35 @@ mod tests {
             GeoPoint::try_new(45.0, -180.1),
             Err(GeoPointError::LongitudeOutOfRange)
         );
+    }
+
+    #[test]
+    fn creates_position_sample() {
+        let point = GeoPoint::try_new(45.0628, 7.7620).unwrap();
+
+        let sample = PositionSample::new(
+            String::from("pincopallo"),
+            42,
+            point,
+            1_755_000_010,
+            Some(1_755_000_000),
+        );
+
+        assert_eq!(sample.username(), "pincopallo");
+        assert_eq!(sample.session_id(), 42);
+        assert_eq!(sample.point(), point);
+        assert_eq!(sample.received_at(), 1_755_000_010);
+        assert_eq!(sample.client_timestamp(), Some(1_755_000_000));
+    }
+
+    #[test]
+    fn accepts_missing_client_timestamp() {
+        let point = GeoPoint::try_new(45.0628, 7.7620).unwrap();
+
+        let sample =
+            PositionSample::new(String::from("pincopallo"), 43, point, 1_755_000_010, None);
+
+        assert_eq!(sample.client_timestamp(), None);
+        assert_eq!(sample.received_at(), 1_755_000_010);
     }
 }
