@@ -25,3 +25,8 @@ users.json
 # File di sistema
 .DS_Store
 Thumbs.db
+
+ORGANIZZAZIONE-2.pdf
+
+# Temporaneo della scrittura atomica dello storage utenti (users.rs)
+users.json.tmp
