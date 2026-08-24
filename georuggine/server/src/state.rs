@@ -11,7 +11,7 @@ use common::{ServerMessage, UserState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 
 /// Soglia (in secondi) di posizione invariata oltre la quale un utente
 /// "in movimento" torna "fermo", come richiesto dalla consegna (3 minuti).
@@ -206,27 +206,20 @@ pub async fn mark_disconnected(clients: &Clients, positions: &Positions, usernam
 }
 
 /// Notifica a tutti i client connessi (tranne l'utente il cui stato è
-/// cambiato) un `ServerMessage::StateChanged`. Stesso pattern lock-poi-invia
-/// di `broadcast`/`direct_message` in `main.rs`.
+/// cambiato) un `ServerMessage::StateChanged`.
+///
+/// La consegna passa dal registro delle sessioni (`session.rs`), che si
+/// occupa del lock e della rimozione dei canali ormai chiusi.
 async fn broadcast_state_change(clients: &Clients, username: &str, new_state: UserState) {
-    let senders: Vec<(String, mpsc::Sender<ServerMessage>)> = {
-        let guard = clients.lock().await;
-        guard
-            .iter()
-            .filter(|(u, _)| u.as_str() != username)
-            .map(|(u, sender)| (u.clone(), sender.clone()))
-            .collect()
-    };
-
-    for (u, sender) in senders {
-        let msg = ServerMessage::StateChanged {
-            username: username.to_string(),
-            new_state: new_state.clone(),
-        };
-        if sender.send(msg).await.is_err() {
-            println!("notifica stato a {u} fallita: canale chiuso");
-        }
-    }
+    clients
+        .broadcast_except(
+            username,
+            ServerMessage::StateChanged {
+                username: username.to_string(),
+                new_state,
+            },
+        )
+        .await;
 }
 
 #[cfg(test)]
@@ -257,7 +250,7 @@ mod tests {
     }
 
     fn no_clients() -> Clients {
-        Arc::new(Mutex::new(HashMap::new()))
+        crate::SessionRegistry::new()
     }
 
     #[tokio::test]
