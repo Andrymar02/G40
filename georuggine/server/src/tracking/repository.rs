@@ -1,6 +1,8 @@
 use super::PositionSample;
 use std::collections::{HashMap, VecDeque};
 
+pub const HISTORY_RETENTION_SECONDS: i64 = 35 * 24 * 60 * 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackingError {
     InvalidPeriod,
@@ -75,6 +77,12 @@ impl InMemoryPositionRepository {
         }
 
         Ok(removed)
+    }
+}
+
+impl Default for InMemoryPositionRepository {
+    fn default() -> Self {
+        Self::new(HISTORY_RETENTION_SECONDS)
     }
 }
 
@@ -253,5 +261,39 @@ mod tests {
         let pincopallo_samples = repository.samples_for_period("pincopallo", 0, 300).unwrap();
 
         assert!(pincopallo_samples.is_empty());
+    }
+
+    #[test]
+    fn default_repository_uses_thirty_five_day_retention() {
+        let mut repository = InMemoryPositionRepository::default();
+
+        let thirty_five_days = 35 * 24 * 60 * 60;
+
+        let pincopallo_old = PositionSample::new(
+            String::from("pincopallo"),
+            13,
+            GeoPoint::try_new(45.0628, 7.7620).unwrap(),
+            100,
+            None,
+        );
+
+        let current_timestamp = 100 + thirty_five_days + 1;
+
+        let pincopallo_current = PositionSample::new(
+            String::from("pincopallo"),
+            13,
+            GeoPoint::try_new(45.0630, 7.7630).unwrap(),
+            current_timestamp,
+            None,
+        );
+
+        repository.insert_sample(&pincopallo_old).unwrap();
+        repository.insert_sample(&pincopallo_current).unwrap();
+
+        let samples = repository
+            .samples_for_period("pincopallo", 0, current_timestamp + 1)
+            .unwrap();
+
+        assert_eq!(samples, vec![pincopallo_current]);
     }
 }
