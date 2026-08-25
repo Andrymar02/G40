@@ -162,3 +162,56 @@ async fn e2e_disconnessione_notificata_agli_altri() {
     // Se il timeout scade, timeout_result sarà un Err
     assert!(timeout_result.is_ok(), "Bob non ha mai ricevuto la notifica di disconnessione di Alice!");
 }
+
+#[tokio::test]
+async fn e2e_chat_utente_inesistente_non_crasha() {
+    use std::process::Stdio;
+    use std::io::Write;
+
+    // 1. Avviamo il server abilitando l'input da terminale (piped)
+    // in modo da potergli "scrivere" dentro dal test.
+    let mut server_process = Command::new("cargo")
+        .args(["run", "-p", "server"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("Impossibile avviare il server");
+    
+    // Estraiamo il "tubo" dove inserire i comandi e creiamo la solita guardia
+    let mut server_stdin = server_process.stdin.take().unwrap();
+    let mut guard = ServerGuard(server_process);
+    let addr = "127.0.0.1:8080";
+    
+    // 2. Aspettiamo che il server sia pronto connettendo un client "esploratore"
+    let _client;
+    let mut tentativi = 0;
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                _client = stream;
+                break;
+            }
+            Err(e) => {
+                tentativi += 1;
+                if tentativi > 30 { panic!("Server non partito: {}", e); }
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+    
+    // 3. AZIONE: Simuliamo l'operatore del server che sbaglia nome utente
+    // Scriviamo il comando seguito dall'invio (\n)
+    writeln!(server_stdin, "/msg utente_fantasma Ciao, ci sei?").unwrap();
+    
+    // Diamo al server mezzo secondo per leggere e processare il comando
+    sleep(Duration::from_millis(500)).await;
+    
+    // 4. VERIFICA: Il server è ancora vivo?
+    // try_wait() restituisce None se il processo sta girando felicemente,
+    // oppure Some(status) se il server è andato in panico ed è morto.
+    let status = guard.0.try_wait().expect("Errore nel controllo del processo");
+    
+    assert!(
+        status.is_none(), 
+        "IL SERVER E' CRASHATO! Mandare un messaggio a un utente inesistente lo ha ucciso."
+    );
+}
