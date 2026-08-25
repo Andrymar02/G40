@@ -8,6 +8,19 @@ pub enum TrackingError {
     InvalidPeriod,
 }
 
+pub trait PositionRepository {
+    fn insert_sample(&mut self, sample: &PositionSample) -> Result<(), TrackingError>;
+
+    fn samples_for_period(
+        &self,
+        username: &str,
+        start_utc: i64,
+        end_utc: i64,
+    ) -> Result<Vec<PositionSample>, TrackingError>;
+
+    fn prune_before(&mut self, cutoff_utc: i64) -> Result<usize, TrackingError>;
+}
+
 pub struct InMemoryPositionRepository {
     samples_by_username: HashMap<String, VecDeque<PositionSample>>,
     retention_seconds: i64,
@@ -20,8 +33,25 @@ impl InMemoryPositionRepository {
             retention_seconds,
         }
     }
+}
 
-    pub fn samples_for_period(
+impl PositionRepository for InMemoryPositionRepository {
+    fn insert_sample(&mut self, sample: &PositionSample) -> Result<(), TrackingError> {
+        let cutoff_utc = sample.received_at().saturating_sub(self.retention_seconds);
+
+        self.prune_before(cutoff_utc)?;
+
+        let samples = self
+            .samples_by_username
+            .entry(sample.username().to_owned())
+            .or_default();
+
+        samples.push_back(sample.clone());
+
+        Ok(())
+    }
+
+    fn samples_for_period(
         &self,
         username: &str,
         start_utc: i64,
@@ -48,22 +78,7 @@ impl InMemoryPositionRepository {
         Ok(samples)
     }
 
-    pub fn insert_sample(&mut self, sample: &PositionSample) -> Result<(), TrackingError> {
-        let cutoff_utc = sample.received_at().saturating_sub(self.retention_seconds);
-
-        self.prune_before(cutoff_utc)?;
-
-        let samples = self
-            .samples_by_username
-            .entry(sample.username().to_owned())
-            .or_default();
-
-        samples.push_back(sample.clone());
-
-        Ok(())
-    }
-
-    pub fn prune_before(&mut self, cutoff_utc: i64) -> Result<usize, TrackingError> {
+    fn prune_before(&mut self, cutoff_utc: i64) -> Result<usize, TrackingError> {
         let mut removed = 0;
 
         for samples in self.samples_by_username.values_mut() {
@@ -90,6 +105,17 @@ impl Default for InMemoryPositionRepository {
 mod tests {
     use super::*;
     use crate::tracking::GeoPoint;
+
+    fn save_and_load(
+        repository: &mut impl PositionRepository,
+        sample: &PositionSample,
+    ) -> Vec<PositionSample> {
+        repository.insert_sample(sample).unwrap();
+
+        repository
+            .samples_for_period(sample.username(), 0, sample.received_at() + 1)
+            .unwrap()
+    }
 
     #[test]
     fn empty_repository_returns_no_samples() {
@@ -295,5 +321,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(samples, vec![pincopallo_current]);
+    }
+
+    #[test]
+    fn sample_can_be_saved_and_loaded_throug_repository_trait() {
+        let mut repository = InMemoryPositionRepository::new(1_000);
+
+        let sample = PositionSample::new(
+            String::from("pincopallo"),
+            42,
+            GeoPoint::try_new(45.0628, 7.7620).unwrap(),
+            150,
+            None,
+        );
+
+        let samples = save_and_load(&mut repository, &sample);
+
+        assert_eq!(samples, vec![sample]);
     }
 }
