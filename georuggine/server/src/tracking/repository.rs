@@ -49,6 +49,8 @@ impl InMemoryPositionRepository {
     pub fn insert_sample(&mut self, sample: &PositionSample) -> Result<(), TrackingError> {
         let cutoff_utc = sample.received_at().saturating_sub(self.retention_seconds);
 
+        self.prune_before(cutoff_utc)?;
+
         let samples = self
             .samples_by_username
             .entry(sample.username().to_owned())
@@ -56,14 +58,23 @@ impl InMemoryPositionRepository {
 
         samples.push_back(sample.clone());
 
-        while samples
-            .front()
-            .is_some_and(|oldest| oldest.received_at() < cutoff_utc)
-        {
-            samples.pop_front();
+        Ok(())
+    }
+
+    pub fn prune_before(&mut self, cutoff_utc: i64) -> Result<usize, TrackingError> {
+        let mut removed = 0;
+
+        for samples in self.samples_by_username.values_mut() {
+            while samples
+                .front()
+                .is_some_and(|oldest| oldest.received_at() < cutoff_utc)
+            {
+                samples.pop_front();
+                removed += 1;
+            }
         }
 
-        Ok(())
+        Ok(removed)
     }
 }
 
@@ -175,5 +186,72 @@ mod tests {
         let samples = repository.samples_for_period("pincopallo", 0, 300).unwrap();
 
         assert_eq!(samples, vec![current_sample]);
+    }
+
+    #[test]
+    fn prune_before_removes_old_samples_from_all_users() {
+        let mut repository = InMemoryPositionRepository::new(1_000);
+
+        let pincopallo_old = PositionSample::new(
+            String::from("pincopallo"),
+            13,
+            GeoPoint::try_new(45.0628, 7.7620).unwrap(),
+            100,
+            None,
+        );
+
+        let francesco_current = PositionSample::new(
+            String::from("francesco"),
+            14,
+            GeoPoint::try_new(45.0630, 7.7630).unwrap(),
+            150,
+            None,
+        );
+
+        repository.insert_sample(&pincopallo_old).unwrap();
+        repository.insert_sample(&francesco_current).unwrap();
+
+        let removed = repository.prune_before(120).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(
+            repository
+                .samples_for_period("pincopallo", 0, 300)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            repository.samples_for_period("francesco", 0, 300).unwrap(),
+            vec![francesco_current]
+        );
+    }
+
+    #[test]
+    fn insertion_prunes_expired_samples_for_all_users() {
+        let mut repository = InMemoryPositionRepository::new(100);
+
+        let pincopallo_old = PositionSample::new(
+            String::from("pincopallo"),
+            13,
+            GeoPoint::try_new(45.0628, 7.7620).unwrap(),
+            100,
+            None,
+        );
+
+        let francesco_current = PositionSample::new(
+            String::from("francesco"),
+            14,
+            GeoPoint::try_new(45.0630, 7.7630).unwrap(),
+            201,
+            None,
+        );
+
+        repository.insert_sample(&pincopallo_old).unwrap();
+        repository.insert_sample(&francesco_current).unwrap();
+
+        let pincopallo_samples = repository.samples_for_period("pincopallo", 0, 300).unwrap();
+
+        assert!(pincopallo_samples.is_empty());
     }
 }
