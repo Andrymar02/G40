@@ -287,3 +287,217 @@ async fn e2e_chat_utente_inesistente_non_crasha() {
         "IL SERVER E' CRASHATO! Mandare un messaggio a un utente inesistente lo ha ucciso."
     );
 }
+
+#[tokio::test]
+async fn e2e_aggiornamento_posizione_notifica_stato() {
+    // Avvia il server in background
+    let addr = "127.0.0.1:8094";
+    let server_process = Command::new("cargo")
+        .args(["run", "-p", "server", "--", addr])
+        .spawn()
+        .expect("Impossibile avviare il server");
+
+    let _guard = ServerGuard(server_process);
+
+    let mut client_a;
+    let mut tentativi = 0;
+
+    // Aspetta che il server sia pronto
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                client_a = stream;
+                break;
+            }
+            Err(e) => {
+                tentativi += 1;
+                if tentativi > 30 {
+                    panic!("Server non partito: {}", e);
+                }
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    // Client A (alice) si registra e fa login
+    send_message(
+        &mut client_a,
+        &ClientMessage::Register {
+            username: "alice".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_a)
+        .await
+        .unwrap();
+
+    send_message(
+        &mut client_a,
+        &ClientMessage::Login {
+            username: "alice".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_a)
+        .await
+        .unwrap();
+
+    // Client B (bob) si connette, si registra e fa login: e' lui che deve
+    // ricevere la notifica del cambio di stato di alice.
+    let mut client_b = TcpStream::connect(addr)
+        .await
+        .expect("Client B non connesso");
+
+    send_message(
+        &mut client_b,
+        &ClientMessage::Register {
+            username: "bob".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_b)
+        .await
+        .unwrap();
+
+    send_message(
+        &mut client_b,
+        &ClientMessage::Login {
+            username: "bob".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_b)
+        .await
+        .unwrap();
+
+    // AZIONE: alice manda la prima posizione via TCP reale (non a livello
+    // di unit test come in state.rs).
+    send_message(
+        &mut client_a,
+        &ClientMessage::PositionUpdate {
+            lat: 45.07,
+            lon: 7.68,
+            timestamp: 1_700_000_000,
+        },
+    )
+    .await
+    .unwrap();
+
+    // VERIFICA: bob deve ricevere lo StateChanged di alice -> Idle (prima
+    // posizione mai ricevuta = notificata, vedi state::tests in state.rs).
+    let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let msg = read_message::<_, ServerMessage>(&mut client_b)
+                .await
+                .unwrap();
+
+            if let ServerMessage::StateChanged {
+                username,
+                new_state,
+            } = msg
+                && username == "alice"
+                && format!("{:?}", new_state).contains("Idle")
+            {
+                return true;
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        timeout_result.is_ok(),
+        "Bob non ha mai ricevuto la notifica del cambio di stato di Alice!"
+    );
+}
+
+#[tokio::test]
+async fn e2e_messaggio_diretto_valido_arriva_al_destinatario() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    // Avvia il server abilitando l'input da terminale (piped), come nel
+    // test della chat verso un utente inesistente: qui pero' il
+    // destinatario esiste ed e' davvero connesso.
+    let addr = "127.0.0.1:8095";
+    let mut server_process = Command::new("cargo")
+        .args(["run", "-p", "server", "--", addr])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("Impossibile avviare il server");
+
+    let mut server_stdin = server_process.stdin.take().unwrap();
+    let _guard = ServerGuard(server_process);
+
+    let mut client;
+    let mut tentativi = 0;
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                client = stream;
+                break;
+            }
+            Err(e) => {
+                tentativi += 1;
+                if tentativi > 30 {
+                    panic!("Server non partito: {}", e);
+                }
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    // Il destinatario si registra e fa login, cosi' risulta connesso.
+    send_message(
+        &mut client,
+        &ClientMessage::Register {
+            username: "carol".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client).await.unwrap();
+
+    send_message(
+        &mut client,
+        &ClientMessage::Login {
+            username: "carol".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client).await.unwrap();
+
+    // AZIONE: l'operatore del server manda un messaggio diretto a carol,
+    // che e' davvero connessa.
+    writeln!(server_stdin, "/msg carol Ciao Carol, ci sei?").unwrap();
+
+    // VERIFICA: carol deve ricevere esattamente quel messaggio, come Direct.
+    let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let msg = read_message::<_, ServerMessage>(&mut client).await.unwrap();
+
+            if let ServerMessage::Direct { from, text } = msg
+                && from == "server"
+                && text == "Ciao Carol, ci sei?"
+            {
+                return true;
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        timeout_result.is_ok(),
+        "Carol non ha mai ricevuto il messaggio diretto!"
+    );
+}
