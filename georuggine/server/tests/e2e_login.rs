@@ -104,7 +104,7 @@ async fn e2e_disconnessione_notificata_agli_altri() {
     let addr = "127.0.0.1:8092";
     let server_process = Command::new("cargo")
         .args(["run", "-p", "server", "--", addr])
-        .stdin(std::process::Stdio::piped()) 
+        .stdin(std::process::Stdio::piped())
         .spawn()
         .expect("Impossibile avviare il server");
 
