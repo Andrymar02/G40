@@ -2,7 +2,7 @@ use common::framing::{read_message, send_message};
 use common::{ClientMessage, ServerMessage};
 use std::process::{Child, Command};
 use tokio::net::TcpStream;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 // Guardia (RAII) per chiudere il server alla fine del test
 struct ServerGuard(Child);
@@ -15,14 +15,14 @@ impl Drop for ServerGuard {
 #[tokio::test]
 async fn e2e_doppio_login_rifiutato() {
     // Avvia il server in background
+    let addr = "127.0.0.1:8091";
     let server_process = Command::new("cargo")
-        .args(["run", "-p", "server"])
+        .args(["run", "-p", "server", "--", addr])
         .spawn()
         .expect("Impossibile avviare il server");
-    
+
     let _guard = ServerGuard(server_process);
-    let addr = "127.0.0.1:8080";
-    
+
     let mut client1;
     let mut tentativi = 0;
 
@@ -44,32 +44,51 @@ async fn e2e_doppio_login_rifiutato() {
     }
 
     // Registra utente (ignoriamo l'esito, se c'è già va bene uguale)
-    send_message(&mut client1, &ClientMessage::Register {
-        username: "utente_test_e2e".to_string(),
-        password: "password123".to_string(),
-    }).await.unwrap();
-    let _ = read_message::<_, ServerMessage>(&mut client1).await.unwrap();
+    send_message(
+        &mut client1,
+        &ClientMessage::Register {
+            username: "utente_test_e2e".to_string(),
+            password: "password123".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client1)
+        .await
+        .unwrap();
 
     // Login col primo client
-    send_message(&mut client1, &ClientMessage::Login {
-        username: "utente_test_e2e".to_string(),
-        password: "password123".to_string(),
-    }).await.unwrap();
-    
+    send_message(
+        &mut client1,
+        &ClientMessage::Login {
+            username: "utente_test_e2e".to_string(),
+            password: "password123".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
     match read_message(&mut client1).await.unwrap() {
-        ServerMessage::LoginOk => {} 
+        ServerMessage::LoginOk => {}
         other => panic!("Login fallito per client 1: {:?}", other),
     }
 
     // Login il secondo client (Bob)
-    let mut client2 = TcpStream::connect(addr).await.expect("Client 2 non connesso");
-    
-    send_message(&mut client2, &ClientMessage::Login {
-        username: "utente_test_e2e".to_string(), // Stesso username
-        password: "password123".to_string(),
-    }).await.unwrap();
+    let mut client2 = TcpStream::connect(addr)
+        .await
+        .expect("Client 2 non connesso");
 
-    // VERIFICA: Il server deve respingerlo 
+    send_message(
+        &mut client2,
+        &ClientMessage::Login {
+            username: "utente_test_e2e".to_string(), // Stesso username
+            password: "password123".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // VERIFICA: Il server deve respingerlo
     match read_message(&mut client2).await.unwrap() {
         ServerMessage::LoginErr(_) => {
             // TEST SUPERATO
@@ -81,14 +100,14 @@ async fn e2e_doppio_login_rifiutato() {
 #[tokio::test]
 async fn e2e_disconnessione_notificata_agli_altri() {
     // Avvia il server in background
+    let addr = "127.0.0.1:8092";
     let server_process = Command::new("cargo")
-        .args(["run", "-p", "server"])
+        .args(["run", "-p", "server", "--", addr])
         .spawn()
         .expect("Impossibile avviare il server");
-    
+
     let _guard = ServerGuard(server_process);
-    let addr = "127.0.0.1:8080";
-    
+
     let mut client_a;
     let mut tentativi = 0;
 
@@ -101,42 +120,83 @@ async fn e2e_disconnessione_notificata_agli_altri() {
             }
             Err(e) => {
                 tentativi += 1;
-                if tentativi > 30 { panic!("Server non partito: {}", e); }
+                if tentativi > 30 {
+                    panic!("Server non partito: {}", e);
+                }
                 sleep(Duration::from_millis(500)).await;
             }
         }
     }
 
     // Client A (Alice) si registra e fa login
-    send_message(&mut client_a, &ClientMessage::Register {
-        username: "alice".to_string(), password: "password".to_string(),
-    }).await.unwrap();
-    let _ = read_message::<_, ServerMessage>(&mut client_a).await.unwrap();
+    send_message(
+        &mut client_a,
+        &ClientMessage::Register {
+            username: "alice".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_a)
+        .await
+        .unwrap();
 
-    send_message(&mut client_a, &ClientMessage::Login {
-        username: "alice".to_string(), password: "password".to_string(),
-    }).await.unwrap();
-    let _ = read_message::<_, ServerMessage>(&mut client_a).await.unwrap();
+    send_message(
+        &mut client_a,
+        &ClientMessage::Login {
+            username: "alice".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_a)
+        .await
+        .unwrap();
 
     // Client B (Bob) si connette, si registra e fa login
-    let mut client_b = TcpStream::connect(addr).await.expect("Client B non connesso");
-    
-    send_message(&mut client_b, &ClientMessage::Register {
-        username: "bob".to_string(), password: "password".to_string(),
-    }).await.unwrap();
-    let _ = read_message::<_, ServerMessage>(&mut client_b).await.unwrap();
+    let mut client_b = TcpStream::connect(addr)
+        .await
+        .expect("Client B non connesso");
 
-    send_message(&mut client_b, &ClientMessage::Login {
-        username: "bob".to_string(), password: "password".to_string(),
-    }).await.unwrap();
-    let _ = read_message::<_, ServerMessage>(&mut client_b).await.unwrap();
+    send_message(
+        &mut client_b,
+        &ClientMessage::Register {
+            username: "bob".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_b)
+        .await
+        .unwrap();
+
+    send_message(
+        &mut client_b,
+        &ClientMessage::Login {
+            username: "bob".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = read_message::<_, ServerMessage>(&mut client_b)
+        .await
+        .unwrap();
 
     // Alice manda la prima posizione per entrare ufficialmente nello stato "Idle"
-    send_message(&mut client_a, &ClientMessage::PositionUpdate {
-        lat: 45.0,
-        lon: 9.0,
-        timestamp: 1690000000,
-    }).await.unwrap();
+    send_message(
+        &mut client_a,
+        &ClientMessage::PositionUpdate {
+            lat: 45.0,
+            lon: 9.0,
+            timestamp: 1690000000,
+        },
+    )
+    .await
+    .unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -147,41 +207,49 @@ async fn e2e_disconnessione_notificata_agli_altri() {
     // Usiamo un timeout di 3 secondi per evitare che il test si blocchi all'infinito se fallisce
     let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let msg = read_message::<_, ServerMessage>(&mut client_b).await.unwrap();
-            
+            let msg = read_message::<_, ServerMessage>(&mut client_b)
+                .await
+                .unwrap();
+
             // Controlliamo se è il messaggio che aspettiamo
-            if let ServerMessage::StateChanged { username, new_state } = msg {
+            if let ServerMessage::StateChanged {
+                username,
+                new_state,
+            } = msg
+            {
                 // new_state è un enum (Disconnected, Idle, Moving). Lo convertiamo in stringa per comodità
                 if username == "alice" && format!("{:?}", new_state).contains("Disconnected") {
                     return true; // Trovato. Esce dal loop e dal timeout
                 }
             }
         }
-    }).await;
+    })
+    .await;
 
     // Se il timeout scade, timeout_result sarà un Err
-    assert!(timeout_result.is_ok(), "Bob non ha mai ricevuto la notifica di disconnessione di Alice!");
+    assert!(
+        timeout_result.is_ok(),
+        "Bob non ha mai ricevuto la notifica di disconnessione di Alice!"
+    );
 }
 
 #[tokio::test]
 async fn e2e_chat_utente_inesistente_non_crasha() {
-    use std::process::Stdio;
     use std::io::Write;
+    use std::process::Stdio;
 
-    // 1. Avviamo il server abilitando l'input da terminale (piped)
-    // in modo da potergli "scrivere" dentro dal test.
+    // Avvia il server abilitando l'input da terminale (piped)
+    let addr = "127.0.0.1:8093";
     let mut server_process = Command::new("cargo")
-        .args(["run", "-p", "server"])
+        .args(["run", "-p", "server", "--", addr])
         .stdin(Stdio::piped())
         .spawn()
         .expect("Impossibile avviare il server");
-    
-    // Estraiamo il "tubo" dove inserire i comandi e creiamo la solita guardia
+
     let mut server_stdin = server_process.stdin.take().unwrap();
     let mut guard = ServerGuard(server_process);
-    let addr = "127.0.0.1:8080";
-    
-    // 2. Aspettiamo che il server sia pronto connettendo un client "esploratore"
+
+    // Aspetta che il server sia pronto connettendo un client "esploratore"
     let _client;
     let mut tentativi = 0;
     loop {
@@ -192,26 +260,30 @@ async fn e2e_chat_utente_inesistente_non_crasha() {
             }
             Err(e) => {
                 tentativi += 1;
-                if tentativi > 30 { panic!("Server non partito: {}", e); }
+                if tentativi > 30 {
+                    panic!("Server non partito: {}", e);
+                }
                 sleep(Duration::from_millis(500)).await;
             }
         }
     }
-    
-    // 3. AZIONE: Simuliamo l'operatore del server che sbaglia nome utente
+
+    // Simula l'operatore del server che sbaglia nome utente
     // Scriviamo il comando seguito dall'invio (\n)
     writeln!(server_stdin, "/msg utente_fantasma Ciao, ci sei?").unwrap();
-    
-    // Diamo al server mezzo secondo per leggere e processare il comando
+
     sleep(Duration::from_millis(500)).await;
-    
-    // 4. VERIFICA: Il server è ancora vivo?
-    // try_wait() restituisce None se il processo sta girando felicemente,
+
+    // VERIFICA: Il server è ancora vivo?
+    // try_wait() restituisce None se il processo sta girando nel modo corretto,
     // oppure Some(status) se il server è andato in panico ed è morto.
-    let status = guard.0.try_wait().expect("Errore nel controllo del processo");
-    
+    let status = guard
+        .0
+        .try_wait()
+        .expect("Errore nel controllo del processo");
+
     assert!(
-        status.is_none(), 
+        status.is_none(),
         "IL SERVER E' CRASHATO! Mandare un messaggio a un utente inesistente lo ha ucciso."
     );
 }

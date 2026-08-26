@@ -352,26 +352,27 @@ mod tests {
         users.register("henry", "password-henry").await.unwrap();
         let prima = std::fs::read_to_string(&path).unwrap();
 
-        // Directory in sola lettura: la creazione del temporaneo fallisce.
-        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o555);
-        }
-        std::fs::set_permissions(&dir, perms).unwrap();
+        // Facciamo sparire la cartella (rinominandola altrove, non
+        // cancellandola) cosi' la scrittura del temporaneo fallisce allo
+        // stesso modo su Unix e su Windows: a differenza dei permessi
+        // POSIX, una cartella "di sola lettura" su Windows non impedisce
+        // la creazione di nuovi file al suo interno, quindi quell'
+        // approccio non e' portabile. Un percorso che non esiste piu'
+        // fallisce invece identicamente ovunque.
+        let dir_spostata = std::env::temp_dir().join(format!(
+            "georuggine_atomica_via_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::rename(&dir, &dir_spostata).unwrap();
 
         let esito = users.register("iris", "password-iris").await;
 
-        // Permessi ripristinati subito, per poter ripulire anche se le
-        // assert sotto falliscono.
-        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o755);
-        }
-        std::fs::set_permissions(&dir, perms).unwrap();
+        // Ripristinata subito, per poter ripulire anche se le assert sotto
+        // falliscono.
+        std::fs::rename(&dir_spostata, &dir).unwrap();
 
         assert!(esito.is_err(), "il salvataggio doveva fallire");
         // Il file precedente e' intatto, byte per byte...
@@ -383,7 +384,7 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
+    
     #[tokio::test]
     async fn salvataggio_fallito_non_lascia_lutente_in_memoria() {
         // Percorso non scrivibile: la directory non esiste, quindi `save`
