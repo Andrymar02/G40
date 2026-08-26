@@ -384,7 +384,7 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-    
+
     #[tokio::test]
     async fn salvataggio_fallito_non_lascia_lutente_in_memoria() {
         // Percorso non scrivibile: la directory non esiste, quindi `save`
