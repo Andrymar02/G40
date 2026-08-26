@@ -18,6 +18,7 @@ async fn e2e_doppio_login_rifiutato() {
     let addr = "127.0.0.1:8091";
     let server_process = Command::new("cargo")
         .args(["run", "-p", "server", "--", addr])
+        .stdin(std::process::Stdio::piped())
         .spawn()
         .expect("Impossibile avviare il server");
 
@@ -103,6 +104,7 @@ async fn e2e_disconnessione_notificata_agli_altri() {
     let addr = "127.0.0.1:8092";
     let server_process = Command::new("cargo")
         .args(["run", "-p", "server", "--", addr])
+        .stdin(std::process::Stdio::piped()) 
         .spawn()
         .expect("Impossibile avviare il server");
 
@@ -294,6 +296,7 @@ async fn e2e_aggiornamento_posizione_notifica_stato() {
     let addr = "127.0.0.1:8094";
     let server_process = Command::new("cargo")
         .args(["run", "-p", "server", "--", addr])
+        .stdin(std::process::Stdio::piped()) // <-- IL TRUCCO PER GITHUB
         .spawn()
         .expect("Impossibile avviare il server");
 
