@@ -34,7 +34,7 @@ jobs:
       run: cargo clippy --workspace --all-targets -- -D warnings
 
     - name: 3. Test automatici
-      run: cargo test --workspace
+      run: cargo test --workspace -- --test-threads=1
 
     - name: 4. Build Release
       run: cargo build --workspace --release
