@@ -1,3 +1,4 @@
+use super::model::MovementReport;
 use super::{GeoPoint, MovementSegment, PositionSample};
 
 /// Intervallo massimo osservabile tra due campioni consecutivi
@@ -156,12 +157,65 @@ fn average_speed(distance_meters: f64, duration_seconds: i64) -> f64 {
     }
 }
 
+/// Costruisce un report di movimento per l'intervallo richiesto
+pub fn build_movement_report(
+    username: &str,
+    period_start: i64,
+    period_end: i64,
+    samples: &[PositionSample],
+) -> MovementReport {
+    let elapsed_seconds = (period_end - period_start).max(0);
+
+    let mut ordered_samples = samples.to_vec();
+    ordered_samples.sort_by_key(|sample| sample.received_at());
+
+    let segments = consecutive_segments(&ordered_samples);
+
+    let total_distance = total_distance_meters(&segments);
+    let observed = observed_seconds(&segments);
+    let paused = paused_seconds(&segments);
+    let moving = moving_seconds(&segments);
+    let unobserved = unobserved_seconds(elapsed_seconds, observed);
+
+    let average_moving = average_speed(total_distance, moving);
+    let average_overall = average_speed(total_distance, observed);
+
+    let mut route: Vec<GeoPoint> = ordered_samples
+        .iter()
+        .map(|sample| sample.point())
+        .collect();
+
+    route.dedup();
+
+    let coverage_start = samples.iter().map(|sample| sample.received_at()).min();
+
+    let coverage_end = samples.iter().map(|sample| sample.received_at()).max();
+
+    MovementReport {
+        username: username.to_owned(),
+        period_start,
+        period_end,
+        coverage_start,
+        coverage_end,
+        route,
+        total_distance_m: total_distance,
+        elapsed_seconds,
+        observed_seconds: observed,
+        moving_seconds: moving,
+        paused_seconds: paused,
+        unobserved_seconds: unobserved,
+        average_moving_speed_m_s: average_moving,
+        average_overall_speed_m_s: average_overall,
+        sample_count: samples.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         EARTH_RADIUS_METERS, MAX_GAP_SECONDS, average_moving_speed, average_overall_speed,
-        consecutive_segments, haversine_distance, moving_seconds, observed_seconds, paused_seconds,
-        total_distance_meters, unobserved_seconds,
+        build_movement_report, consecutive_segments, haversine_distance, moving_seconds,
+        observed_seconds, paused_seconds, total_distance_meters, unobserved_seconds,
     };
     use crate::tracking::{GeoPoint, PositionSample, SessionId};
     use std::f64::consts::PI;
@@ -573,5 +627,99 @@ mod tests {
     #[test]
     fn empty_segments_have_zero_average_overall_speed() {
         assert_eq!(average_overall_speed(&[]), 0.0);
+    }
+
+    #[test]
+    fn empty_samples_produce_empty_movement_report() {
+        let report = build_movement_report("pincopallo", 100, 400, &[]);
+
+        assert_eq!(report.username, "pincopallo");
+        assert_eq!(report.period_start, 100);
+        assert_eq!(report.period_end, 400);
+        assert_eq!(report.coverage_start, None);
+        assert_eq!(report.coverage_end, None);
+        assert!(report.route.is_empty());
+        assert_eq!(report.total_distance_m, 0.0);
+        assert_eq!(report.elapsed_seconds, 300);
+        assert_eq!(report.observed_seconds, 0);
+        assert_eq!(report.moving_seconds, 0);
+        assert_eq!(report.paused_seconds, 0);
+        assert_eq!(report.unobserved_seconds, 300);
+        assert_eq!(report.average_moving_speed_m_s, 0.0);
+        assert_eq!(report.average_overall_speed_m_s, 0.0);
+        assert_eq!(report.sample_count, 0);
+    }
+
+    #[test]
+    fn non_empty_report_declares_available_coverage() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 240),
+            sample(13, 45.0, 7.0, 120),
+            sample(13, 45.0, 7.0, 180),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 300, &samples);
+
+        assert_eq!(report.coverage_start, Some(120));
+        assert_eq!(report.coverage_end, Some(240));
+        assert_eq!(report.sample_count, 3);
+    }
+
+    #[test]
+    fn report_route_is_chronological() {
+        let first = GeoPoint::try_new(45.0, 7.0).unwrap();
+        let second = GeoPoint::try_new(45.1, 7.1).unwrap();
+        let third = GeoPoint::try_new(45.2, 7.2).unwrap();
+
+        let samples = vec![
+            sample(13, third.lat(), third.lon(), 240),
+            sample(13, first.lat(), first.lon(), 120),
+            sample(13, second.lat(), second.lon(), 180),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 300, &samples);
+
+        assert_eq!(report.route, vec![first, second, third]);
+    }
+
+    #[test]
+    fn report_route_removes_only_consecutive_duplicates() {
+        let first = GeoPoint::try_new(45.0, 7.0).unwrap();
+        let second = GeoPoint::try_new(46.0, 8.0).unwrap();
+
+        let samples = vec![
+            sample(13, first.lat(), first.lon(), 100),
+            sample(13, first.lat(), first.lon(), 160),
+            sample(13, second.lat(), second.lon(), 220),
+            sample(13, second.lat(), second.lon(), 280),
+            sample(13, first.lat(), first.lon(), 340),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 400, &samples);
+        assert_eq!(report.route, vec![first, second, first]);
+    }
+
+    #[test]
+    fn report_aggregates_movement_metrics() {
+        let sixty_meters_in_degrees = (60.0 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, 0.0, 160),
+            sample(13, 0.0, 0.0, 220),
+            sample(13, 0.0, 0.0, 280),
+            sample(13, 0.0, sixty_meters_in_degrees, 340),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 400, &samples);
+
+        assert!((report.total_distance_m - 60.0).abs() < 0.000_001);
+        assert_eq!(report.elapsed_seconds, 300);
+        assert_eq!(report.observed_seconds, 240);
+        assert_eq!(report.paused_seconds, 180);
+        assert_eq!(report.moving_seconds, 60);
+        assert_eq!(report.unobserved_seconds, 60);
+        assert!((report.average_moving_speed_m_s - 1.0).abs() < 0.000_001);
+        assert!((report.average_overall_speed_m_s - 0.25).abs() < 0.000_001);
     }
 }
