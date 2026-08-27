@@ -722,4 +722,55 @@ mod tests {
         assert!((report.average_moving_speed_m_s - 1.0).abs() < 0.000_001);
         assert!((report.average_overall_speed_m_s - 0.25).abs() < 0.000_001);
     }
+
+    #[test]
+    fn stationary_run_below_threshold_is_not_a_pause() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 279),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 179);
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn stationary_run_above_threshold_counts_in_full() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+            sample(13, 45.0, 7.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 240);
+        assert_eq!(paused_seconds(&segments), 240);
+    }
+
+    #[test]
+    fn multiple_qualified_pauses_are_summed() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+            sample(13, 46.0, 8.0, 340),
+            sample(13, 46.0, 8.0, 400),
+            sample(13, 46.0, 8.0, 460),
+            sample(13, 46.0, 8.0, 520),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 420);
+        assert_eq!(paused_seconds(&segments), 360);
+        assert_eq!(moving_seconds(&segments), 60);
+    }
 }
