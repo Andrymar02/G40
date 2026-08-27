@@ -34,22 +34,24 @@ const CLIENT_CHANNEL_CAPACITY: usize = 32;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    // Indirizzo:porta configurabile da riga di comando, con default se
-    // omesso — utile per far girare più server sulla stessa macchina
-    // durante i test, o per un ambiente diverso da quello locale.
-    let bind_addr = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
+    // Indirizzo:porta e file utenti configurabili da riga di comando, con
+    // default se omessi — utile per far girare più server sulla stessa
+    // macchina durante i test (ognuno con il proprio file utenti isolato,
+    // vedi server/tests/e2e_login.rs), o per un ambiente diverso da quello
+    // locale.
+    let mut args = std::env::args().skip(1);
+    let bind_addr = args.next().unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
+    let users_file = args.next().unwrap_or_else(|| USERS_FILE.to_string());
 
     // Uno storage utenti illeggibile ferma l'avvio: vedi `users::UserStore::load`.
     // Si carica prima del bind, per non lasciare aperta una porta su un
     // server che non puo' autenticare nessuno.
-    let users: Users = match users::UserStore::load(USERS_FILE) {
+    let users: Users = match users::UserStore::load(&users_file) {
         Ok(users) => users,
         Err(reason) => {
             eprintln!("Avvio interrotto: {reason}");
             eprintln!(
-                "Controllare {USERS_FILE}: rimuoverlo solo se si accetta di perdere le registrazioni."
+                "Controllare {users_file}: rimuoverlo solo se si accetta di perdere le registrazioni."
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
         }

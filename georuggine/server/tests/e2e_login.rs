@@ -1,6 +1,7 @@
 use common::framing::{read_message, send_message};
 use common::{ClientMessage, ServerMessage};
 use std::process::{Child, Command};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, sleep};
 
@@ -12,37 +13,76 @@ impl Drop for ServerGuard {
     }
 }
 
-#[tokio::test]
-async fn e2e_doppio_login_rifiutato() {
-    // Avvia il server in background
-    let addr = "127.0.0.1:8091";
+/// Percorso di un file utenti temporaneo e univoco per il test `name`.
+///
+/// PROBLEMA CORRETTO: prima ogni test lanciava il server vero senza passargli
+/// un file utenti, quindi tutti e 5 finivano su `users.json` nella working
+/// directory di `cargo test` — lo stesso file usato da chiunque avesse
+/// lanciato il server a mano in precedenza. Se quel file conteneva gia'
+/// "alice"/"bob"/"carol" con password diverse da quelle dei test, la
+/// `Register` falliva ("username gia' in uso") e anche la `Login`
+/// successiva (password non corrispondente): l'utente non si autenticava
+/// mai e il test restava bloccato in attesa di un messaggio che non
+/// sarebbe mai arrivato. Stesso principio gia' usato da
+/// `users::tests::temp_path` per i test unitari di `UserStore`.
+fn temp_users_file(name: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir()
+        .join(format!("georuggine_e2e_{name}_{unique}.json"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Rimuove il file utenti del test (e l'eventuale temporaneo `.tmp` lasciato
+/// da una scrittura in corso) a fine test. Best-effort: se il test e' andato
+/// in panic prima di arrivare qui, il file resta — stesso compromesso gia'
+/// accettato dai test unitari di `UserStore`.
+fn cleanup_users_file(path: &str) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{path}.tmp"));
+}
+
+/// Avvia il server vero su `addr` con il file utenti `users_file`, aspetta
+/// che accetti connessioni (max 15s) e ritorna sia il processo (da tenere
+/// vivo con `ServerGuard`) sia la connessione di prova, riusabile come primo
+/// client del test.
+///
+/// Prima questo stesso blocco di ~15 righe era copiato in ognuno dei 5 test:
+/// estratto qui per non doverlo aggiornare in 5 posti diversi ad ogni
+/// modifica (es. timeout, backoff).
+async fn spawn_server(addr: &str, users_file: &str) -> (Child, TcpStream) {
     let server_process = Command::new("cargo")
-        .args(["run", "-p", "server", "--", addr])
+        .args(["run", "-p", "server", "--", addr, users_file])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .expect("Impossibile avviare il server");
 
-    let _guard = ServerGuard(server_process);
-
-    let mut client1;
     let mut tentativi = 0;
-
-    // Aspetta che il server sia pronto a rispondere (Max 15 secondi)
-    loop {
+    let stream = loop {
         match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                client1 = stream;
-                break; // Connesso
-            }
+            Ok(stream) => break stream,
             Err(e) => {
                 tentativi += 1;
                 if tentativi > 30 {
-                    panic!("Il server non è partito dopo 15 secondi! Errore: {}", e);
+                    panic!("Il server non è partito dopo 15 secondi! Errore: {e}");
                 }
                 sleep(Duration::from_millis(500)).await;
             }
         }
-    }
+    };
+
+    (server_process, stream)
+}
+
+#[tokio::test]
+async fn e2e_doppio_login_rifiutato() {
+    let addr = "127.0.0.1:8091";
+    let users_file = temp_users_file("doppio_login");
+    let (server_process, mut client1) = spawn_server(addr, &users_file).await;
+    let _guard = ServerGuard(server_process);
 
     // Registra utente (ignoriamo l'esito, se c'è già va bene uguale)
     send_message(
@@ -96,39 +136,16 @@ async fn e2e_doppio_login_rifiutato() {
         }
         other => panic!("Ci aspettavamo LoginErr, invece: {:?}", other),
     }
+
+    cleanup_users_file(&users_file);
 }
 
 #[tokio::test]
 async fn e2e_disconnessione_notificata_agli_altri() {
-    // Avvia il server in background
     let addr = "127.0.0.1:8092";
-    let server_process = Command::new("cargo")
-        .args(["run", "-p", "server", "--", addr])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .expect("Impossibile avviare il server");
-
+    let users_file = temp_users_file("disconnessione");
+    let (server_process, mut client_a) = spawn_server(addr, &users_file).await;
     let _guard = ServerGuard(server_process);
-
-    let mut client_a;
-    let mut tentativi = 0;
-
-    // Aspetta che il server sia pronto
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                client_a = stream;
-                break;
-            }
-            Err(e) => {
-                tentativi += 1;
-                if tentativi > 30 {
-                    panic!("Server non partito: {}", e);
-                }
-                sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
 
     // Client A (Alice) si registra e fa login
     send_message(
@@ -233,42 +250,20 @@ async fn e2e_disconnessione_notificata_agli_altri() {
         timeout_result.is_ok(),
         "Bob non ha mai ricevuto la notifica di disconnessione di Alice!"
     );
+
+    cleanup_users_file(&users_file);
 }
 
 #[tokio::test]
 async fn e2e_chat_utente_inesistente_non_crasha() {
     use std::io::Write;
-    use std::process::Stdio;
 
-    // Avvia il server abilitando l'input da terminale (piped)
     let addr = "127.0.0.1:8093";
-    let mut server_process = Command::new("cargo")
-        .args(["run", "-p", "server", "--", addr])
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("Impossibile avviare il server");
+    let users_file = temp_users_file("chat_inesistente");
+    let (mut server_process, _client) = spawn_server(addr, &users_file).await;
 
     let mut server_stdin = server_process.stdin.take().unwrap();
     let mut guard = ServerGuard(server_process);
-
-    // Aspetta che il server sia pronto connettendo un client "esploratore"
-    let _client;
-    let mut tentativi = 0;
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                _client = stream;
-                break;
-            }
-            Err(e) => {
-                tentativi += 1;
-                if tentativi > 30 {
-                    panic!("Server non partito: {}", e);
-                }
-                sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
 
     // Simula l'operatore del server che sbaglia nome utente
     // Scriviamo il comando seguito dall'invio (\n)
@@ -288,39 +283,16 @@ async fn e2e_chat_utente_inesistente_non_crasha() {
         status.is_none(),
         "IL SERVER E' CRASHATO! Mandare un messaggio a un utente inesistente lo ha ucciso."
     );
+
+    cleanup_users_file(&users_file);
 }
 
 #[tokio::test]
 async fn e2e_aggiornamento_posizione_notifica_stato() {
-    // Avvia il server in background
     let addr = "127.0.0.1:8094";
-    let server_process = Command::new("cargo")
-        .args(["run", "-p", "server", "--", addr])
-        .stdin(std::process::Stdio::piped()) // <-- IL TRUCCO PER GITHUB
-        .spawn()
-        .expect("Impossibile avviare il server");
-
+    let users_file = temp_users_file("posizione_stato");
+    let (server_process, mut client_a) = spawn_server(addr, &users_file).await;
     let _guard = ServerGuard(server_process);
-
-    let mut client_a;
-    let mut tentativi = 0;
-
-    // Aspetta che il server sia pronto
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                client_a = stream;
-                break;
-            }
-            Err(e) => {
-                tentativi += 1;
-                if tentativi > 30 {
-                    panic!("Server non partito: {}", e);
-                }
-                sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
 
     // Client A (alice) si registra e fa login
     send_message(
@@ -419,43 +391,22 @@ async fn e2e_aggiornamento_posizione_notifica_stato() {
         timeout_result.is_ok(),
         "Bob non ha mai ricevuto la notifica del cambio di stato di Alice!"
     );
+
+    cleanup_users_file(&users_file);
 }
 
 #[tokio::test]
 async fn e2e_messaggio_diretto_valido_arriva_al_destinatario() {
     use std::io::Write;
-    use std::process::Stdio;
 
-    // Avvia il server abilitando l'input da terminale (piped), come nel
-    // test della chat verso un utente inesistente: qui pero' il
-    // destinatario esiste ed e' davvero connesso.
+    // Qui il destinatario esiste ed e' davvero connesso, a differenza del
+    // test della chat verso un utente inesistente.
     let addr = "127.0.0.1:8095";
-    let mut server_process = Command::new("cargo")
-        .args(["run", "-p", "server", "--", addr])
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("Impossibile avviare il server");
+    let users_file = temp_users_file("messaggio_diretto");
+    let (mut server_process, mut client) = spawn_server(addr, &users_file).await;
 
     let mut server_stdin = server_process.stdin.take().unwrap();
     let _guard = ServerGuard(server_process);
-
-    let mut client;
-    let mut tentativi = 0;
-    loop {
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                client = stream;
-                break;
-            }
-            Err(e) => {
-                tentativi += 1;
-                if tentativi > 30 {
-                    panic!("Server non partito: {}", e);
-                }
-                sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
 
     // Il destinatario si registra e fa login, cosi' risulta connesso.
     send_message(
@@ -503,4 +454,6 @@ async fn e2e_messaggio_diretto_valido_arriva_al_destinatario() {
         timeout_result.is_ok(),
         "Carol non ha mai ricevuto il messaggio diretto!"
     );
+
+    cleanup_users_file(&users_file);
 }
