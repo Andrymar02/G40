@@ -40,6 +40,47 @@ impl GeoPoint {
     }
 }
 
+pub type SessionId = u64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackingSession {
+    id: SessionId,
+    username: String,
+    connected_at: i64,
+    disconnected_at: Option<i64>,
+}
+
+impl TrackingSession {
+    pub fn new(id: SessionId, username: String, connected_at: i64) -> Self {
+        Self {
+            id,
+            username,
+            connected_at,
+            disconnected_at: None,
+        }
+    }
+
+    pub fn id(&self) -> SessionId {
+        self.id
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn connected_at(&self) -> i64 {
+        self.connected_at
+    }
+
+    pub fn disconnected_at(&self) -> Option<i64> {
+        self.disconnected_at
+    }
+
+    pub fn close(&mut self, disconnected_at: i64) {
+        self.disconnected_at = Some(disconnected_at);
+    }
+}
+
 /// Posizione ricevuta dal server.
 ///
 /// received_at è il timestamp del server usato per l'ordinamento.
@@ -47,7 +88,7 @@ impl GeoPoint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PositionSample {
     username: String,
-    session_id: i64,
+    session_id: SessionId,
     point: GeoPoint,
     received_at: i64,
     client_timestamp: Option<i64>,
@@ -56,7 +97,7 @@ pub struct PositionSample {
 impl PositionSample {
     pub fn new(
         username: String,
-        session_id: i64,
+        session_id: SessionId,
         point: GeoPoint,
         received_at: i64,
         client_timestamp: Option<i64>,
@@ -74,7 +115,7 @@ impl PositionSample {
         &self.username
     }
 
-    pub fn session_id(&self) -> i64 {
+    pub fn session_id(&self) -> SessionId {
         self.session_id
     }
 
@@ -97,7 +138,7 @@ impl PositionSample {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MovementSegment {
-    session_id: i64,
+    session_id: SessionId,
     start: GeoPoint,
     end: GeoPoint,
     started_at: i64,
@@ -109,7 +150,7 @@ impl MovementSegment {
     /// pub(crate) === new può essere chiamato soltanto all'interno di questo crate (server)
     /// i moduli esterni possono leggere il segmento ma non possono crearne uno arbitrariamente
     pub(crate) fn new(
-        session_id: i64,
+        session_id: SessionId,
         start: GeoPoint,
         end: GeoPoint,
         started_at: i64,
@@ -126,7 +167,7 @@ impl MovementSegment {
         }
     }
 
-    pub fn session_id(&self) -> i64 {
+    pub fn session_id(&self) -> SessionId {
         self.session_id
     }
 
