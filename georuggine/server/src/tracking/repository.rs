@@ -120,6 +120,10 @@ impl PositionRepository for InMemoryPositionRepository {
             return Err(TrackingError::SessionNotActive);
         }
 
+        if sample.received_at() < session.connected_at() {
+            return Err(TrackingError::InvalidSessionTimestamp);
+        }
+
         let cutoff_utc = sample.received_at().saturating_sub(self.retention_seconds);
 
         self.prune_before(cutoff_utc)?;
@@ -587,6 +591,33 @@ mod tests {
         assert!(
             repository
                 .samples_for_period("francesco", 100, 200)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn sample_before_session_connection_is_rejected() {
+        let mut repository = InMemoryPositionRepository::new(1_000);
+
+        repository.open_session(13, "alice", 100).unwrap();
+
+        let sample = PositionSample::new(
+            String::from("alice"),
+            13,
+            GeoPoint::try_new(45.0268, 7.7620).unwrap(),
+            99,
+            None,
+        );
+
+        assert_eq!(
+            repository.insert_sample(&sample),
+            Err(TrackingError::InvalidSessionTimestamp)
+        );
+
+        assert!(
+            repository
+                .samples_for_period("alice", 0, 200)
                 .unwrap()
                 .is_empty()
         );
