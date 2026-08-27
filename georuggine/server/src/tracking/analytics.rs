@@ -4,6 +4,8 @@ use super::{GeoPoint, MovementSegment, PositionSample};
 pub const MAX_GAP_SECONDS: i64 = 75;
 /// Raggio terrestre medio usato dal modello sferico
 const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
+/// Secondi minimi per essere considerata pausa
+pub const PAUSE_THRESHOLD_SECONDS: i64 = 180;
 
 /// Calcola in metri la distanza sulla superficie terrestre tra due punti.
 pub fn haversine_distance(start: GeoPoint, end: GeoPoint) -> f64 {
@@ -65,9 +67,71 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
     segments
 }
 
+/// Somma di tutte le distanze (in metri) dei segmenti
+pub fn total_distance_meters(segments: &[MovementSegment]) -> f64 {
+    segments
+        .iter()
+        .map(|segment| segment.distance_meters())
+        .sum()
+}
+/// Somma di tutti i tempi (in secondi) osservati
+pub fn observed_seconds(segments: &[MovementSegment]) -> i64 {
+    segments
+        .iter()
+        .map(|segment| segment.duration_seconds())
+        .sum()
+}
+/// Calcolo dei tempi totali delle pause che passano il check. Misurati in secondi.
+///
+/// Una sequenza ferma viene conteggiata per intero quando raggiunge
+/// [`PAUSE_THRESHOLD_SECONDS`]. Movimento, gap, discontinuità e cambi
+/// di sessione separano le sequenze.
+pub fn paused_seconds(segments: &[MovementSegment]) -> i64 {
+    let mut total_paused_seconds = 0;
+    let mut current_stationary_seconds = 0;
+    let mut previous_segment: Option<&MovementSegment> = None;
+
+    for segment in segments {
+        let continues_previous = match previous_segment {
+            None => true,
+            Some(previous) => {
+                previous.session_id() == segment.session_id()
+                    && previous.ended_at() == segment.started_at()
+                    && previous.end() == segment.start()
+            }
+        };
+
+        let changed_position = segment.changed_position();
+
+        if !continues_previous || changed_position {
+            total_paused_seconds += qualified_pause_seconds(current_stationary_seconds);
+            current_stationary_seconds = 0;
+        }
+
+        if !changed_position {
+            current_stationary_seconds += segment.duration_seconds();
+        }
+
+        previous_segment = Some(segment);
+    }
+
+    total_paused_seconds + qualified_pause_seconds(current_stationary_seconds)
+}
+
+fn qualified_pause_seconds(stationary_seconds: i64) -> i64 {
+    if stationary_seconds >= PAUSE_THRESHOLD_SECONDS {
+        stationary_seconds
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EARTH_RADIUS_METERS, MAX_GAP_SECONDS, consecutive_segments, haversine_distance};
+    use super::{
+        EARTH_RADIUS_METERS, MAX_GAP_SECONDS, consecutive_segments, haversine_distance,
+        observed_seconds, paused_seconds, total_distance_meters,
+    };
     use crate::tracking::{GeoPoint, PositionSample, SessionId};
     use std::f64::consts::PI;
 
@@ -291,5 +355,121 @@ mod tests {
 
         assert!((segment.distance_meters() - 0.5).abs() < 0.000_001);
         assert!(!segment.changed_position());
+    }
+
+    #[test]
+    fn empty_segments_have_zero_total_distance() {
+        assert_eq!(total_distance_meters(&[]), 0.0);
+    }
+
+    #[test]
+    fn total_distance_is_the_sum_of_segment_distances() {
+        let samples = vec![
+            sample(13, 44.0000, 7.0000, 100),
+            sample(13, 44.5000, 7.5000, 130),
+            sample(13, 45.0000, 8.0000, 160),
+        ];
+
+        let segments = consecutive_segments(&samples);
+        let expected = segments[0].distance_meters() + segments[1].distance_meters();
+        let total = total_distance_meters(&segments);
+
+        assert!((total - expected).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn observed_seconds_sums_segment_durations() {
+        let samples = vec![
+            sample(13, 44.0, 7.0, 100),
+            sample(13, 44.5, 7.5, 130),
+            sample(13, 45.0, 8.0, 170),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 70);
+    }
+
+    #[test]
+    fn stationary_run_at_threshold_counts_as_full_pause() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(paused_seconds(&segments), 180);
+    }
+
+    #[test]
+    fn separate_short_stationary_runs_do_not_form_a_pause() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 46.0, 8.0, 280),
+            sample(13, 46.0, 8.0, 340),
+            sample(13, 46.0, 8.0, 400),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn gap_separates_short_stationary_runs() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 400),
+            sample(13, 45.0, 7.0, 460),
+            sample(13, 45.0, 7.0, 520),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 4);
+
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn non_increasing_timestamp_separates_stationary_runs() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 46.0, 8.0, 220),
+            sample(13, 46.0, 8.0, 280),
+            sample(13, 46.0, 8.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 4);
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn session_change_separates_stationary_runs() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(21, 45.0, 7.0, 220),
+            sample(21, 45.0, 7.0, 280),
+            sample(21, 45.0, 7.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 4);
+
+        assert_eq!(paused_seconds(&segments), 0);
     }
 }
