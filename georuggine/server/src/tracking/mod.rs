@@ -1,5 +1,6 @@
 mod analytics;
 mod model;
+mod period;
 mod repository;
 
 pub use analytics::{
@@ -9,8 +10,10 @@ pub use analytics::{
 };
 pub use model::{
     GeoPoint, GeoPointError, MOVEMENT_THRESHOLD_METERS, MovementReport, MovementSegment,
-    PositionSample, SessionId, TrackingSession,
+    PositionSample, ReportPeriod, SessionId, TrackingSession,
 };
 pub use repository::{
     HISTORY_RETENTION_SECONDS, InMemoryPositionRepository, PositionRepository, TrackingError,
 };
+
+pub use period::resolve_report_period;

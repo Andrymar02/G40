@@ -221,6 +221,15 @@ pub struct MovementReport {
     pub sample_count: usize,
 }
 
+/// Periodo richiesto per un report in movimento
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportPeriod {
+    CurrentDay,
+    CurrentWeek,
+    CurrentMonth,
+    Custom { start_utc: i64, end_utc: i64 },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
