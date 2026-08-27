@@ -1,9 +1,12 @@
+use super::model::MovementReport;
 use super::{GeoPoint, MovementSegment, PositionSample};
 
 /// Intervallo massimo osservabile tra due campioni consecutivi
 pub const MAX_GAP_SECONDS: i64 = 75;
 /// Raggio terrestre medio usato dal modello sferico
 const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
+/// Secondi minimi per essere considerata pausa
+pub const PAUSE_THRESHOLD_SECONDS: i64 = 180;
 
 /// Calcola in metri la distanza sulla superficie terrestre tra due punti.
 pub fn haversine_distance(start: GeoPoint, end: GeoPoint) -> f64 {
@@ -65,9 +68,155 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
     segments
 }
 
+/// Somma di tutte le distanze (in metri) dei segmenti
+pub fn total_distance_meters(segments: &[MovementSegment]) -> f64 {
+    segments
+        .iter()
+        .map(|segment| segment.distance_meters())
+        .sum()
+}
+/// Somma di tutti i tempi (in secondi) osservati
+pub fn observed_seconds(segments: &[MovementSegment]) -> i64 {
+    segments
+        .iter()
+        .map(|segment| segment.duration_seconds())
+        .sum()
+}
+/// Calcolo dei tempi totali delle pause che passano il check. Misurati in secondi.
+///
+/// Una sequenza ferma viene conteggiata per intero quando raggiunge
+/// [`PAUSE_THRESHOLD_SECONDS`]. Movimento, gap, discontinuità e cambi
+/// di sessione separano le sequenze.
+pub fn paused_seconds(segments: &[MovementSegment]) -> i64 {
+    let mut total_paused_seconds = 0;
+    let mut current_stationary_seconds = 0;
+    let mut previous_segment: Option<&MovementSegment> = None;
+
+    for segment in segments {
+        let continues_previous = match previous_segment {
+            None => true,
+            Some(previous) => {
+                previous.session_id() == segment.session_id()
+                    && previous.ended_at() == segment.started_at()
+                    && previous.end() == segment.start()
+            }
+        };
+
+        let changed_position = segment.changed_position();
+
+        if !continues_previous || changed_position {
+            total_paused_seconds += qualified_pause_seconds(current_stationary_seconds);
+            current_stationary_seconds = 0;
+        }
+
+        if !changed_position {
+            current_stationary_seconds += segment.duration_seconds();
+        }
+
+        previous_segment = Some(segment);
+    }
+
+    total_paused_seconds + qualified_pause_seconds(current_stationary_seconds)
+}
+
+fn qualified_pause_seconds(stationary_seconds: i64) -> i64 {
+    if stationary_seconds >= PAUSE_THRESHOLD_SECONDS {
+        stationary_seconds
+    } else {
+        0
+    }
+}
+
+/// Calcola il tempo in movimento come differenza tra tempo osservato e pause.
+pub fn moving_seconds(segments: &[MovementSegment]) -> i64 {
+    (observed_seconds(segments) - paused_seconds(segments)).max(0)
+}
+
+/// Calcola la parte non osservata nell'intervallo (in secondi)
+pub fn unobserved_seconds(elapsed_seconds: i64, observed_seconds: i64) -> i64 {
+    (elapsed_seconds - observed_seconds).max(0)
+}
+
+/// Calcola la velocità media di movimento (m/s);
+///
+/// Restituisce 0.0 quando non esiste tempo di movimento
+pub fn average_moving_speed(segments: &[MovementSegment]) -> f64 {
+    average_speed(total_distance_meters(segments), moving_seconds(segments))
+}
+
+/// Calcola la velocità media complessiva in metri al secondo.
+pub fn average_overall_speed(segments: &[MovementSegment]) -> f64 {
+    average_speed(total_distance_meters(segments), observed_seconds(segments))
+}
+
+fn average_speed(distance_meters: f64, duration_seconds: i64) -> f64 {
+    if duration_seconds == 0 {
+        0.0
+    } else {
+        distance_meters / duration_seconds as f64
+    }
+}
+
+/// Costruisce un report di movimento per l'intervallo richiesto
+pub fn build_movement_report(
+    username: &str,
+    period_start: i64,
+    period_end: i64,
+    samples: &[PositionSample],
+) -> MovementReport {
+    let elapsed_seconds = (period_end - period_start).max(0);
+
+    let mut ordered_samples = samples.to_vec();
+    ordered_samples.sort_by_key(|sample| sample.received_at());
+
+    let segments = consecutive_segments(&ordered_samples);
+
+    let total_distance = total_distance_meters(&segments);
+    let observed = observed_seconds(&segments);
+    let paused = paused_seconds(&segments);
+    let moving = moving_seconds(&segments);
+    let unobserved = unobserved_seconds(elapsed_seconds, observed);
+
+    let average_moving = average_speed(total_distance, moving);
+    let average_overall = average_speed(total_distance, observed);
+
+    let mut route: Vec<GeoPoint> = ordered_samples
+        .iter()
+        .map(|sample| sample.point())
+        .collect();
+
+    route.dedup();
+
+    let coverage_start = samples.iter().map(|sample| sample.received_at()).min();
+
+    let coverage_end = samples.iter().map(|sample| sample.received_at()).max();
+
+    MovementReport {
+        username: username.to_owned(),
+        period_start,
+        period_end,
+        coverage_start,
+        coverage_end,
+        route,
+        total_distance_m: total_distance,
+        elapsed_seconds,
+        observed_seconds: observed,
+        moving_seconds: moving,
+        paused_seconds: paused,
+        unobserved_seconds: unobserved,
+        average_moving_speed_m_s: average_moving,
+        average_overall_speed_m_s: average_overall,
+        sample_count: samples.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EARTH_RADIUS_METERS, MAX_GAP_SECONDS, consecutive_segments, haversine_distance};
+    use super::{
+        EARTH_RADIUS_METERS, MAX_GAP_SECONDS, average_moving_speed, average_overall_speed,
+        build_movement_report, consecutive_segments, haversine_distance, moving_seconds,
+        observed_seconds, paused_seconds, total_distance_meters, unobserved_seconds,
+    };
     use crate::tracking::{GeoPoint, PositionSample, SessionId};
     use std::f64::consts::PI;
 
@@ -291,5 +440,337 @@ mod tests {
 
         assert!((segment.distance_meters() - 0.5).abs() < 0.000_001);
         assert!(!segment.changed_position());
+    }
+
+    #[test]
+    fn empty_segments_have_zero_total_distance() {
+        assert_eq!(total_distance_meters(&[]), 0.0);
+    }
+
+    #[test]
+    fn total_distance_is_the_sum_of_segment_distances() {
+        let samples = vec![
+            sample(13, 44.0000, 7.0000, 100),
+            sample(13, 44.5000, 7.5000, 130),
+            sample(13, 45.0000, 8.0000, 160),
+        ];
+
+        let segments = consecutive_segments(&samples);
+        let expected = segments[0].distance_meters() + segments[1].distance_meters();
+        let total = total_distance_meters(&segments);
+
+        assert!((total - expected).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn observed_seconds_sums_segment_durations() {
+        let samples = vec![
+            sample(13, 44.0, 7.0, 100),
+            sample(13, 44.5, 7.5, 130),
+            sample(13, 45.0, 8.0, 170),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 70);
+    }
+
+    #[test]
+    fn stationary_run_at_threshold_counts_as_full_pause() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(paused_seconds(&segments), 180);
+    }
+
+    #[test]
+    fn separate_short_stationary_runs_do_not_form_a_pause() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 46.0, 8.0, 280),
+            sample(13, 46.0, 8.0, 340),
+            sample(13, 46.0, 8.0, 400),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn gap_separates_short_stationary_runs() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 400),
+            sample(13, 45.0, 7.0, 460),
+            sample(13, 45.0, 7.0, 520),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 4);
+
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn non_increasing_timestamp_separates_stationary_runs() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 46.0, 8.0, 220),
+            sample(13, 46.0, 8.0, 280),
+            sample(13, 46.0, 8.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 4);
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn session_change_separates_stationary_runs() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(21, 45.0, 7.0, 220),
+            sample(21, 45.0, 7.0, 280),
+            sample(21, 45.0, 7.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(segments.len(), 4);
+
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn moving_seconds_excludes_qualified_pauses() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+            sample(13, 46.0, 8.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(moving_seconds(&segments), 60);
+    }
+
+    #[test]
+    fn unobserved_seconds_is_elapsed_minus_observed() {
+        assert_eq!(unobserved_seconds(300, 70), 230);
+    }
+
+    #[test]
+    fn unobserved_seconds_cannot_be_negative() {
+        assert_eq!(unobserved_seconds(60, 90), 0);
+    }
+
+    #[test]
+    fn empty_segment_have_zero_average_moving_speed() {
+        assert_eq!(average_moving_speed(&[]), 0.0);
+    }
+
+    #[test]
+    fn average_moving_speed_excludes_pause_time() {
+        let sixty_meters_in_degrees = (60.0 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, 0.0, 160),
+            sample(13, 0.0, 0.0, 220),
+            sample(13, 0.0, 0.0, 280),
+            sample(13, 0.0, sixty_meters_in_degrees, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+        let speed = average_moving_speed(&segments);
+
+        assert!((speed - 1.0).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn average_overall_speed_includes_pause_time() {
+        let sixty_meters_in_degrees = (60.0 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, 0.0, 160),
+            sample(13, 0.0, 0.0, 220),
+            sample(13, 0.0, 0.0, 280),
+            sample(13, 0.0, sixty_meters_in_degrees, 340),
+        ];
+
+        let segmetns = consecutive_segments(&samples);
+        let speed = average_overall_speed(&segmetns);
+
+        assert!((speed - 0.25).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn empty_segments_have_zero_average_overall_speed() {
+        assert_eq!(average_overall_speed(&[]), 0.0);
+    }
+
+    #[test]
+    fn empty_samples_produce_empty_movement_report() {
+        let report = build_movement_report("pincopallo", 100, 400, &[]);
+
+        assert_eq!(report.username, "pincopallo");
+        assert_eq!(report.period_start, 100);
+        assert_eq!(report.period_end, 400);
+        assert_eq!(report.coverage_start, None);
+        assert_eq!(report.coverage_end, None);
+        assert!(report.route.is_empty());
+        assert_eq!(report.total_distance_m, 0.0);
+        assert_eq!(report.elapsed_seconds, 300);
+        assert_eq!(report.observed_seconds, 0);
+        assert_eq!(report.moving_seconds, 0);
+        assert_eq!(report.paused_seconds, 0);
+        assert_eq!(report.unobserved_seconds, 300);
+        assert_eq!(report.average_moving_speed_m_s, 0.0);
+        assert_eq!(report.average_overall_speed_m_s, 0.0);
+        assert_eq!(report.sample_count, 0);
+    }
+
+    #[test]
+    fn non_empty_report_declares_available_coverage() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 240),
+            sample(13, 45.0, 7.0, 120),
+            sample(13, 45.0, 7.0, 180),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 300, &samples);
+
+        assert_eq!(report.coverage_start, Some(120));
+        assert_eq!(report.coverage_end, Some(240));
+        assert_eq!(report.sample_count, 3);
+    }
+
+    #[test]
+    fn report_route_is_chronological() {
+        let first = GeoPoint::try_new(45.0, 7.0).unwrap();
+        let second = GeoPoint::try_new(45.1, 7.1).unwrap();
+        let third = GeoPoint::try_new(45.2, 7.2).unwrap();
+
+        let samples = vec![
+            sample(13, third.lat(), third.lon(), 240),
+            sample(13, first.lat(), first.lon(), 120),
+            sample(13, second.lat(), second.lon(), 180),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 300, &samples);
+
+        assert_eq!(report.route, vec![first, second, third]);
+    }
+
+    #[test]
+    fn report_route_removes_only_consecutive_duplicates() {
+        let first = GeoPoint::try_new(45.0, 7.0).unwrap();
+        let second = GeoPoint::try_new(46.0, 8.0).unwrap();
+
+        let samples = vec![
+            sample(13, first.lat(), first.lon(), 100),
+            sample(13, first.lat(), first.lon(), 160),
+            sample(13, second.lat(), second.lon(), 220),
+            sample(13, second.lat(), second.lon(), 280),
+            sample(13, first.lat(), first.lon(), 340),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 400, &samples);
+        assert_eq!(report.route, vec![first, second, first]);
+    }
+
+    #[test]
+    fn report_aggregates_movement_metrics() {
+        let sixty_meters_in_degrees = (60.0 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, 0.0, 160),
+            sample(13, 0.0, 0.0, 220),
+            sample(13, 0.0, 0.0, 280),
+            sample(13, 0.0, sixty_meters_in_degrees, 340),
+        ];
+
+        let report = build_movement_report("pincopallo", 100, 400, &samples);
+
+        assert!((report.total_distance_m - 60.0).abs() < 0.000_001);
+        assert_eq!(report.elapsed_seconds, 300);
+        assert_eq!(report.observed_seconds, 240);
+        assert_eq!(report.paused_seconds, 180);
+        assert_eq!(report.moving_seconds, 60);
+        assert_eq!(report.unobserved_seconds, 60);
+        assert!((report.average_moving_speed_m_s - 1.0).abs() < 0.000_001);
+        assert!((report.average_overall_speed_m_s - 0.25).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn stationary_run_below_threshold_is_not_a_pause() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 279),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 179);
+        assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn stationary_run_above_threshold_counts_in_full() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+            sample(13, 45.0, 7.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 240);
+        assert_eq!(paused_seconds(&segments), 240);
+    }
+
+    #[test]
+    fn multiple_qualified_pauses_are_summed() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+            sample(13, 46.0, 8.0, 340),
+            sample(13, 46.0, 8.0, 400),
+            sample(13, 46.0, 8.0, 460),
+            sample(13, 46.0, 8.0, 520),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(observed_seconds(&segments), 420);
+        assert_eq!(paused_seconds(&segments), 360);
+        assert_eq!(moving_seconds(&segments), 60);
     }
 }

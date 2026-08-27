@@ -201,6 +201,26 @@ impl MovementSegment {
     }
 }
 
+/// Report aggregato del movimento di un utente in un intervallo temporale
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovementReport {
+    pub username: String,
+    pub period_start: i64,
+    pub period_end: i64,
+    pub coverage_start: Option<i64>,
+    pub coverage_end: Option<i64>,
+    pub route: Vec<GeoPoint>,
+    pub total_distance_m: f64,
+    pub elapsed_seconds: i64,
+    pub observed_seconds: i64,
+    pub moving_seconds: i64,
+    pub paused_seconds: i64,
+    pub unobserved_seconds: i64,
+    pub average_moving_speed_m_s: f64,
+    pub average_overall_speed_m_s: f64,
+    pub sample_count: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
