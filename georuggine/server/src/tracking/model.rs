@@ -42,6 +42,45 @@ impl GeoPoint {
 
 pub type SessionId = u64;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackingSession {
+    id: SessionId,
+    username: String,
+    connected_at: i64,
+    disconnected_at: Option<i64>,
+}
+
+impl TrackingSession {
+    pub fn new(id: SessionId, username: String, connected_at: i64) -> Self {
+        Self {
+            id,
+            username,
+            connected_at,
+            disconnected_at: None,
+        }
+    }
+
+    pub fn id(&self) -> SessionId {
+        self.id
+    }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn connected_at(&self) -> i64 {
+        self.connected_at
+    }
+
+    pub fn disconnected_at(&self) -> Option<i64> {
+        self.disconnected_at
+    }
+
+    pub fn close(&mut self, disconnected_at: i64) {
+        self.disconnected_at = Some(disconnected_at);
+    }
+}
+
 /// Posizione ricevuta dal server.
 ///
 /// received_at è il timestamp del server usato per l'ordinamento.
