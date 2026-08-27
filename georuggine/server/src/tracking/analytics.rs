@@ -68,10 +68,10 @@ pub fn consecutive_segments(samples: &[PositionSample]) -> Vec<MovementSegment> 
 #[cfg(test)]
 mod tests {
     use super::{EARTH_RADIUS_METERS, MAX_GAP_SECONDS, consecutive_segments, haversine_distance};
-    use crate::tracking::{GeoPoint, PositionSample};
+    use crate::tracking::{GeoPoint, PositionSample, SessionId};
     use std::f64::consts::PI;
 
-    fn sample(session_id: i64, lat: f64, lon: f64, received_at: i64) -> PositionSample {
+    fn sample(session_id: SessionId, lat: f64, lon: f64, received_at: i64) -> PositionSample {
         PositionSample::new(
             String::from("picopallo"),
             session_id,
