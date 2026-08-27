@@ -2,6 +2,7 @@ mod analytics;
 mod model;
 mod period;
 mod repository;
+mod service;
 
 pub use analytics::{
     MAX_GAP_SECONDS, PAUSE_THRESHOLD_SECONDS, average_moving_speed, average_overall_speed,
@@ -17,3 +18,5 @@ pub use repository::{
 };
 
 pub use period::resolve_report_period;
+
+pub use service::TrackingService;
