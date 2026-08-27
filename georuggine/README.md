@@ -37,8 +37,8 @@ Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimba
 ### `server` (🟡 funzionante, non production-ready)
 
 - Accetta connessioni su un indirizzo configurabile (default `0.0.0.0:8080`, sovrascrivibile: `cargo run -p server -- <indirizzo:porta>`), un task `tokio::spawn` per client.
-- **Autenticazione** (`users.rs`): `UserStore` con `HashMap<String, String>` (username → password **in chiaro**, vedi limitazioni sotto) persistito su `users.json`. Username duplicato → `RegisterErr`; credenziali errate → `LoginErr`.
-- **Stato condiviso client connessi**: `Arc<Mutex<HashMap<String, mpsc::Sender<ServerMessage>>>>` (pattern attore). Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf`; i lock sulla mappa si tengono solo per lookup/clone del `Sender`, mai durante la scrittura in rete.
+- **Autenticazione** (`users.rs`): `UserStore` con `HashMap<String, String>` (username → password **in chiaro**, scelta deliberata: vedi limitazioni sotto) persistito su `users.json`. Username duplicato → `RegisterErr`; credenziali errate → `LoginErr`. Username e password sono validati (non vuoti, max 64 caratteri, username solo `[A-Za-z0-9_-]`). Un `users.json` **corrotto ferma l'avvio** invece di far ripartire il server con un database vuoto, che alla prima registrazione sovrascriverebbe le credenziali esistenti.
+- **Registro sessioni** (`session.rs`, ✅): ogni connessione riceve un `SessionId` univoco alla accept. Un secondo login con lo stesso username viene **rifiutato** (vince chi è entrato per primo); logout e pulizia dei canali chiusi rimuovono una voce solo se l'id combacia, così una connessione che termina in ritardo non può sfrattare la sessione che nel frattempo ha preso quell'username. Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf`; i lock si tengono solo per lookup/clone del `Sender`, mai durante la scrittura in rete.
 - **Macchina a stati live** (`state.rs`, ✅): traccia per utente ultima posizione nota e stato (`Disconnected`/`Idle`/`Moving`).
   - Transizioni: prima posizione mai ricevuta → `Idle`; coordinate cambiate → `Moving`; coordinate ferme da ≥3 minuti (`IDLE_THRESHOLD_SECONDS`) → `Idle`; disconnessione → `Disconnected`. Notifica `StateChanged` agli altri client solo quando lo stato cambia davvero.
   - **Orologio del server**, non timestamp del client: le transizioni usano un trait `Clock` (`SystemClock` in produzione, un orologio simulato nei test) — un client con l'orologio sbagliato non può falsare le transizioni.
@@ -110,10 +110,12 @@ Vedi `ORGANIZZAZIONE.md` per il piano completo. In sintesi, restano tre aree ind
 
 - **Storico posizioni e analisi movimento** (tragitto, velocità media, durata movimento/pause, su giorno/settimana/mese) — non iniziato, proprietà di Viorel.
 - **Requisiti non funzionali**: log CPU ogni 2 minuti, build/misure su una seconda piattaforma, dimensione eseguibili — non iniziato, proprietà di Alice.
-- **Lato server**: gestione sessioni per evitare login simultanei, hashing password, persistenza atomica dello storage utenti, comandi aggiuntivi alla console (/all, /to, /stats, /users) — proprietà di Francesco.
+- **Lato server**: persistenza atomica dello storage utenti, comandi aggiuntivi alla console (`/all`, `/to`, `/stats`) — proprietà di Francesco. Gestione sessioni e login simultanei: ✅ fatto (`session.rs`); `/users`: ✅ fatto.
+
+**Decisioni già prese come gruppo:**
+- **Nessun hashing delle password**: restano in chiaro, in memoria e su `users.json`. La consegna non pone requisiti di sicurezza (chiede solo account e password in fase di registrazione) e chiede invece attenzione a dimensione dell'eseguibile e consumo di CPU, che una funzione di hashing peggiorerebbe. Di conseguenza tutto viaggia in chiaro sulla rete, password del messaggio `Login` incluse: niente TLS.
 
 **Decisioni ancora aperte, da discutere come gruppo:**
-- Sicurezza del trasporto (TLS?) — al momento tutto viaggia in chiaro, incluse le password nel messaggio `Login`.
 - Se/quando passare da JSON a un formato binario (`bincode`) per prestazioni.
 - Gestione riconnessioni/timeout lato client (oggi, se la connessione cade, il client stampa un errore e i task terminano: nessun retry automatico).
 - Comportamento della console server quando lo stdin non è un terminale interattivo (vedi limite noto sopra).
