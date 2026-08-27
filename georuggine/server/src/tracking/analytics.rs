@@ -126,11 +126,42 @@ fn qualified_pause_seconds(stationary_seconds: i64) -> i64 {
     }
 }
 
+/// Calcola il tempo in movimento come differenza tra tempo osservato e pause.
+pub fn moving_seconds(segments: &[MovementSegment]) -> i64 {
+    (observed_seconds(segments) - paused_seconds(segments)).max(0)
+}
+
+/// Calcola la parte non osservata nell'intervallo (in secondi)
+pub fn unobserved_seconds(elapsed_seconds: i64, observed_seconds: i64) -> i64 {
+    (elapsed_seconds - observed_seconds).max(0)
+}
+
+/// Calcola la velocità media di movimento (m/s);
+///
+/// Restituisce 0.0 quando non esiste tempo di movimento
+pub fn average_moving_speed(segments: &[MovementSegment]) -> f64 {
+    average_speed(total_distance_meters(segments), moving_seconds(segments))
+}
+
+/// Calcola la velocità media complessiva in metri al secondo.
+pub fn average_overall_speed(segments: &[MovementSegment]) -> f64 {
+    average_speed(total_distance_meters(segments), observed_seconds(segments))
+}
+
+fn average_speed(distance_meters: f64, duration_seconds: i64) -> f64 {
+    if duration_seconds == 0 {
+        0.0
+    } else {
+        distance_meters / duration_seconds as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        EARTH_RADIUS_METERS, MAX_GAP_SECONDS, consecutive_segments, haversine_distance,
-        observed_seconds, paused_seconds, total_distance_meters,
+        EARTH_RADIUS_METERS, MAX_GAP_SECONDS, average_moving_speed, average_overall_speed,
+        consecutive_segments, haversine_distance, moving_seconds, observed_seconds, paused_seconds,
+        total_distance_meters, unobserved_seconds,
     };
     use crate::tracking::{GeoPoint, PositionSample, SessionId};
     use std::f64::consts::PI;
@@ -471,5 +502,76 @@ mod tests {
         assert_eq!(segments.len(), 4);
 
         assert_eq!(paused_seconds(&segments), 0);
+    }
+
+    #[test]
+    fn moving_seconds_excludes_qualified_pauses() {
+        let samples = vec![
+            sample(13, 45.0, 7.0, 100),
+            sample(13, 45.0, 7.0, 160),
+            sample(13, 45.0, 7.0, 220),
+            sample(13, 45.0, 7.0, 280),
+            sample(13, 46.0, 8.0, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+
+        assert_eq!(moving_seconds(&segments), 60);
+    }
+
+    #[test]
+    fn unobserved_seconds_is_elapsed_minus_observed() {
+        assert_eq!(unobserved_seconds(300, 70), 230);
+    }
+
+    #[test]
+    fn unobserved_seconds_cannot_be_negative() {
+        assert_eq!(unobserved_seconds(60, 90), 0);
+    }
+
+    #[test]
+    fn empty_segment_have_zero_average_moving_speed() {
+        assert_eq!(average_moving_speed(&[]), 0.0);
+    }
+
+    #[test]
+    fn average_moving_speed_excludes_pause_time() {
+        let sixty_meters_in_degrees = (60.0 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, 0.0, 160),
+            sample(13, 0.0, 0.0, 220),
+            sample(13, 0.0, 0.0, 280),
+            sample(13, 0.0, sixty_meters_in_degrees, 340),
+        ];
+
+        let segments = consecutive_segments(&samples);
+        let speed = average_moving_speed(&segments);
+
+        assert!((speed - 1.0).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn average_overall_speed_includes_pause_time() {
+        let sixty_meters_in_degrees = (60.0 / EARTH_RADIUS_METERS).to_degrees();
+
+        let samples = vec![
+            sample(13, 0.0, 0.0, 100),
+            sample(13, 0.0, 0.0, 160),
+            sample(13, 0.0, 0.0, 220),
+            sample(13, 0.0, 0.0, 280),
+            sample(13, 0.0, sixty_meters_in_degrees, 340),
+        ];
+
+        let segmetns = consecutive_segments(&samples);
+        let speed = average_overall_speed(&segmetns);
+
+        assert!((speed - 0.25).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn empty_segments_have_zero_average_overall_speed() {
+        assert_eq!(average_overall_speed(&[]), 0.0);
     }
 }
