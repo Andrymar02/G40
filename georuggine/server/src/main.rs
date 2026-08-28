@@ -4,6 +4,9 @@ mod users;
 
 use common::framing;
 use common::{ClientMessage, ServerMessage};
+use server::tracking::{
+    GeoPoint, MovementReport, PositionSample, ReportPeriod, SharedTracking, new_tracking,
+};
 use session::{DeliveryError, LoginRejected, SessionId, SessionRegistry};
 use state::{Positions, SharedClock, SystemClock};
 use std::io;
@@ -62,6 +65,8 @@ async fn main() -> io::Result<()> {
     let positions: Positions = state::new_positions();
     let clock: SharedClock = Arc::new(SystemClock);
 
+    let tracking: SharedTracking = new_tracking();
+
     println!("Server in ascolto su {bind_addr}");
 
     // Il loop di accept gira in un task a parte: il task principale resta
@@ -72,6 +77,9 @@ async fn main() -> io::Result<()> {
         let users = users.clone();
         let positions = positions.clone();
         let clock = clock.clone();
+
+        let tracking = tracking.clone();
+
         tokio::spawn(async move {
             loop {
                 let (socket, addr) = match listener.accept().await {
@@ -86,15 +94,61 @@ async fn main() -> io::Result<()> {
                 let positions = positions.clone();
                 let clock = clock.clone();
                 println!("{:?} {:?}", socket, addr);
+
+                let tracking = tracking.clone();
+
                 tokio::spawn(async move {
-                    handle_client(socket, addr, clients, users, positions, clock).await;
+                    handle_client(socket, addr, clients, users, positions, clock, tracking).await;
                 });
             }
         });
     }
 
-    admin_console(clients).await;
+    admin_console(clients, tracking, clock).await;
     Ok(())
+}
+
+const STATS_USAGE: &str = "Uso: /stats <utente> <day|week|month|custom start_utc end_utc>";
+
+fn parse_stats_args(input: &str) -> Result<(&str, ReportPeriod), &'static str> {
+    let mut args = input.split_whitespace();
+
+    let username = args.next();
+    let period = args.next();
+    let start = args.next();
+    let end = args.next();
+    let extra = args.next();
+
+    match (username, period, start, end, extra) {
+        (Some(username), Some("day"), None, None, None) => Ok((username, ReportPeriod::CurrentDay)),
+        (Some(username), Some("week"), None, None, None) => {
+            Ok((username, ReportPeriod::CurrentWeek))
+        }
+        (Some(username), Some("month"), None, None, None) => {
+            Ok((username, ReportPeriod::CurrentMonth))
+        }
+        (Some(username), Some("custom"), Some(start), Some(end), None) => {
+            let start_utc = start.parse::<i64>().map_err(|_| STATS_USAGE)?;
+
+            let end_utc = end.parse::<i64>().map_err(|_| STATS_USAGE)?;
+
+            Ok((username, ReportPeriod::Custom { start_utc, end_utc }))
+        }
+        _ => Err(STATS_USAGE),
+    }
+}
+
+async fn build_stats_report(
+    tracking: &SharedTracking,
+    input: &str,
+    now_utc: i64,
+) -> Result<MovementReport, String> {
+    let (username, period) = parse_stats_args(input).map_err(|error| error.to_string())?;
+
+    tracking
+        .movement_report(username, period, now_utc)
+        .await
+        .map_err(|error| format!("{error:?}"))
 }
 
 /// Console dell'operatore lato server: legge righe da stdin del processo
@@ -103,9 +157,12 @@ async fn main() -> io::Result<()> {
 /// consegna, la scelta broadcast-vs-diretto spetta al server, non a un
 /// client che indica un destinatario (i messaggi che i client mandano con
 /// `ChatToServer` restano infatti solo lato server, vedi `handle_client`).
-async fn admin_console(clients: Clients) {
+async fn admin_console(clients: Clients, tracking: SharedTracking, clock: SharedClock) {
     println!(
-        "Console operatore: testo libero = broadcast, '/msg <utente> <testo>' = diretto, '/users' = connessi."
+        "Console operatore: testo libero = broadcast, \
+     '/msg <utente> <testo>' = diretto, \
+     '/stats <utente> <day|week|month|custom start_utc end_utc>' = statistiche, \
+     '/users' = connessi."
     );
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
@@ -121,6 +178,17 @@ async fn admin_console(clients: Clients) {
                 println!("nessun utente connesso");
             } else {
                 println!("connessi ({}): {}", connected.len(), connected.join(", "));
+            }
+        } else if line == "/stats" {
+            println!("{STATS_USAGE}");
+        } else if let Some(rest) = line.strip_prefix("/stats ") {
+            let now_utc = clock.now_secs();
+
+            match build_stats_report(&tracking, rest, now_utc).await {
+                Ok(report) => println!("{report:#?}"),
+                Err(error) => {
+                    println!("statistiche non disponibili: {error}");
+                }
             }
         } else if let Some(rest) = line.strip_prefix("/msg ") {
             match rest.split_once(' ') {
@@ -158,6 +226,7 @@ async fn handle_client(
     users: Users,
     positions: Positions,
     clock: SharedClock,
+    tracking: SharedTracking,
 ) {
     let (mut read_half, write_half) = socket.into_split();
 
@@ -205,8 +274,28 @@ async fn handle_client(
                     // per primo, questa viene respinta.
                     match clients.login(&u, session_id, tx.clone()).await {
                         Ok(()) => {
+                            let connected_at = clock.now_secs();
+
+                            if let Err(error) =
+                                tracking.open_session(session_id, &u, connected_at).await
+                            {
+                                let _ = clients.logout(&u, session_id).await;
+
+                                println!("[{addr}] apertura tracking fallita per {u}: {error:?}");
+
+                                let _ = tx
+                                    .send(ServerMessage::LoginErr(
+                                        "errore interno durante il login".to_string(),
+                                    ))
+                                    .await;
+
+                                continue;
+                            }
+
                             println!("[{addr}] login: {u} (sessione {session_id})");
+
                             username = Some(u.clone());
+
                             let _ = tx.send(ServerMessage::LoginOk).await;
                         }
                         Err(LoginRejected::AlreadyConnected) => {
@@ -246,7 +335,35 @@ async fn handle_client(
                 println!("[{addr}] posizione: ({lat}, {lon}) @ {timestamp}");
                 match &username {
                     Some(u) => {
-                        state::update_position(&clients, &positions, &clock, u, lat, lon).await;
+                        let point = match GeoPoint::try_new(lat, lon) {
+                            Ok(point) => point,
+                            Err(error) => {
+                                println!("[{addr}] posizione ignorata per {u}: {error:?}");
+                                continue;
+                            }
+                        };
+
+                        let accepted =
+                            state::update_position(&clients, &positions, &clock, u, lat, lon).await;
+
+                        if accepted {
+                            let received_at = clock.now_secs();
+
+                            let sample = PositionSample::new(
+                                u.clone(),
+                                session_id,
+                                point,
+                                received_at,
+                                Some(timestamp),
+                            );
+
+                            if let Err(error) = tracking.record_position(sample).await {
+                                println!(
+                                    "[{addr}] salvataggio posizione fallito \
+                 per {u}: {error:?}"
+                                );
+                            }
+                        }
                     }
                     None => println!("[{addr}] posizione ignorata: utente non loggato"),
                 }
@@ -265,11 +382,24 @@ async fn handle_client(
         // Si rimuove solo se la sessione registrata e' ancora questa: una
         // connessione che termina in ritardo non deve sfrattare quella che
         // nel frattempo ha preso lo stesso username.
+        let disconnected_at = clock.now_secs();
+
         if clients.logout(&u, session_id).await {
             println!("[{addr}] disconnesso: {u} (sessione {session_id})");
+
+            if let Err(error) = tracking.close_session(session_id, disconnected_at).await {
+                println!(
+                    "[{addr}] chiusura tracking fallita \
+             per {u}: {error:?}"
+                );
+            }
+
             state::mark_disconnected(&clients, &positions, &u).await;
         } else {
-            println!("[{addr}] sessione {session_id} chiusa: {u} è già su un'altra sessione");
+            println!(
+                "[{addr}] sessione {session_id} chiusa: \
+         {u} è già su un'altra sessione"
+            );
         }
     }
 }
@@ -307,5 +437,63 @@ async fn direct_message(clients: &Clients, to: &str, text: &str) {
         Err(DeliveryError::ChannelClosed) => {
             println!("invio a {to} fallito: canale chiuso, sessione rimossa")
         }
+    }
+}
+
+#[cfg(test)]
+mod stats_command_tests {
+    use super::{build_stats_report, parse_stats_args};
+    use server::tracking::{ReportPeriod, new_tracking};
+
+    #[test]
+    fn stats_command_parses_current_day() {
+        let (username, period) = parse_stats_args("alice day").unwrap();
+
+        assert_eq!(username, "alice");
+        assert_eq!(period, ReportPeriod::CurrentDay);
+    }
+
+    #[test]
+    fn stats_command_parses_current_week() {
+        let (username, period) = parse_stats_args("alice week").unwrap();
+
+        assert_eq!(username, "alice");
+        assert_eq!(period, ReportPeriod::CurrentWeek);
+    }
+
+    #[test]
+    fn stats_command_parses_current_month() {
+        let (username, period) = parse_stats_args("alice month").unwrap();
+
+        assert_eq!(username, "alice");
+        assert_eq!(period, ReportPeriod::CurrentMonth);
+    }
+
+    #[test]
+    fn stats_command_parses_custom_period() {
+        let (username, period) = parse_stats_args("alice custom 100 400").unwrap();
+
+        assert_eq!(username, "alice");
+        assert_eq!(
+            period,
+            ReportPeriod::Custom {
+                start_utc: 100,
+                end_utc: 400,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_command_builds_empty_custom_report() {
+        let tracking = new_tracking();
+
+        let report = build_stats_report(&tracking, "alice custom 100 400", 999)
+            .await
+            .unwrap();
+
+        assert_eq!(report.username, "alice");
+        assert_eq!(report.period_start, 100);
+        assert_eq!(report.period_end, 400);
+        assert_eq!(report.sample_count, 0);
     }
 }

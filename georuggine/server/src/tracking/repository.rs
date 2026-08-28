@@ -37,6 +37,12 @@ pub trait PositionRepository {
         end_utc: i64,
     ) -> Result<Vec<PositionSample>, TrackingError>;
 
+    fn latest_sample_before(
+        &self,
+        username: &str,
+        before_utc: i64,
+    ) -> Result<Option<PositionSample>, TrackingError>;
+
     fn prune_before(&mut self, cutoff_utc: i64) -> Result<usize, TrackingError>;
 }
 
@@ -179,6 +185,23 @@ impl PositionRepository for InMemoryPositionRepository {
         }
 
         Ok(removed)
+    }
+
+    fn latest_sample_before(
+        &self,
+        username: &str,
+        before_utc: i64,
+    ) -> Result<Option<PositionSample>, TrackingError> {
+        let sample = self.samples_by_username.get(username).and_then(|samples| {
+            samples
+                .iter()
+                .filter(|sample| sample.received_at() < before_utc)
+                .max_by_key(|sample| sample.received_at())
+                // max_by_key perché cerchiamo il campione con il timestamp maggiore tra quelli precedenti al confine, indipendentemente dall’ordine d’inserimento.
+                .cloned()
+        });
+
+        Ok(sample)
     }
 }
 
