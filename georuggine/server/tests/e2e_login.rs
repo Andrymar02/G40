@@ -457,3 +457,77 @@ async fn e2e_messaggio_diretto_valido_arriva_al_destinatario() {
 
     cleanup_users_file(&users_file);
 }
+
+#[tokio::test]
+async fn e2e_reconnect_after_disconnect_opens_new_tracking_session() {
+    let addr = "127.0.0.1:8096";
+    let users_file = temp_users_file("tracking_reconnect");
+
+    let (server_process, mut first_client) = spawn_server(addr, &users_file).await;
+
+    let _guard = ServerGuard(server_process);
+
+    send_message(
+        &mut first_client,
+        &ClientMessage::Register {
+            username: "alice".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _ = read_message::<_, ServerMessage>(&mut first_client)
+        .await
+        .unwrap();
+
+    send_message(
+        &mut first_client,
+        &ClientMessage::Login {
+            username: "alice".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        read_message::<_, ServerMessage>(&mut first_client)
+            .await
+            .unwrap(),
+        ServerMessage::LoginOk
+    ));
+
+    drop(first_client);
+
+    sleep(Duration::from_millis(500)).await;
+
+    let mut second_client = TcpStream::connect(addr)
+        .await
+        .expect("seconda connessione fallita");
+
+    send_message(
+        &mut second_client,
+        &ClientMessage::Login {
+            username: "alice".to_string(),
+            password: "password".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        read_message::<_, ServerMessage>(&mut second_client),
+    )
+    .await
+    .expect("il server non ha risposto")
+    .unwrap();
+
+    assert!(
+        matches!(response, ServerMessage::LoginOk),
+        "Alice non può riconnettersi: {response:?}"
+    );
+
+    cleanup_users_file(&users_file);
+}

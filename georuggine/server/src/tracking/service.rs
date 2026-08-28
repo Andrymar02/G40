@@ -1,8 +1,9 @@
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    MovementReport, PositionRepository, PositionSample, ReportPeriod, SessionId, TrackingError,
-    build_movement_report, resolve_report_period,
+    InMemoryPositionRepository, MovementReport, PositionRepository, PositionSample, ReportPeriod,
+    SessionId, TrackingError, build_movement_report, resolve_report_period,
 };
 
 pub struct TrackingService<R> {
@@ -75,11 +76,17 @@ impl<R: PositionRepository> TrackingService<R> {
     }
 }
 
+pub type SharedTracking = Arc<TrackingService<InMemoryPositionRepository>>;
+
+pub fn new_tracking() -> SharedTracking {
+    Arc::new(TrackingService::new(InMemoryPositionRepository::default()))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tracking::{
         GeoPoint, InMemoryPositionRepository, PositionSample, ReportPeriod, TrackingError,
-        TrackingService,
+        TrackingService, new_tracking,
     };
 
     #[tokio::test]
@@ -197,5 +204,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.observed_seconds, 60);
+    }
+
+    #[tokio::test]
+    async fn cloned_tracking_handles_share_the_same_history() {
+        let tracking = new_tracking();
+        let connection_tracking = tracking.clone();
+
+        connection_tracking
+            .open_session(42, "alice", 100)
+            .await
+            .unwrap();
+
+        let sample = PositionSample::new(
+            String::from("alice"),
+            42,
+            GeoPoint::try_new(45.0628, 7.6620).unwrap(),
+            150,
+            None,
+        );
+
+        connection_tracking.record_position(sample).await.unwrap();
+
+        let report = tracking
+            .movement_report(
+                "alice",
+                ReportPeriod::Custom {
+                    start_utc: 100,
+                    end_utc: 200,
+                },
+                999,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.sample_count, 1);
     }
 }

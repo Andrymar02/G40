@@ -19,4 +19,4 @@ pub use repository::{
 
 pub use period::resolve_report_period;
 
-pub use service::TrackingService;
+pub use service::{SharedTracking, TrackingService, new_tracking};
