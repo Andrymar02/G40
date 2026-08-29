@@ -161,7 +161,7 @@ impl SessionRegistry {
         let mut stale = Vec::new();
         for (username, id, sender) in targets {
             if sender.send(msg.clone()).await.is_err() {
-                println!("invio a {username} fallito: canale chiuso");
+                crate::detail!("invio a {username} fallito: canale chiuso");
                 stale.push((username, id));
             }
         }

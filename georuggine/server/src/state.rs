@@ -13,9 +13,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-/// Soglia (in secondi) di posizione invariata oltre la quale un utente
-/// "in movimento" torna "fermo", come richiesto dalla consegna (3 minuti).
-pub const IDLE_THRESHOLD_SECONDS: i64 = 180;
+// La soglia di posizione invariata oltre la quale un utente "in movimento"
+// torna "fermo" (consegna: 3 minuti) vive in `common::timing`, che permette
+// di accorciarla con una variabile d'ambiente durante le prove manuali senza
+// toccare il default. I test qui sotto usano la costante direttamente:
+// hanno già un orologio simulato e non devono dipendere dall'ambiente.
 
 /// Sorgente di tempo per la macchina a stati.
 ///
@@ -126,7 +128,7 @@ pub async fn update_position(
     lon: f64,
 ) -> bool {
     if !is_valid_lat(lat) || !is_valid_lon(lon) {
-        println!("posizione scartata per {username}: coordinate non valide ({lat}, {lon})");
+        crate::detail!("posizione scartata per {username}: coordinate non valide ({lat}, {lon})");
         return false;
     }
 
@@ -161,7 +163,7 @@ pub async fn update_position(
                 entry.state = LiveState::Known(UserState::Moving);
             }
             LiveState::Known(UserState::Moving)
-                if now - entry.last_change_secs >= IDLE_THRESHOLD_SECONDS =>
+                if now - entry.last_change_secs >= common::timing::idle_threshold_seconds() =>
             {
                 entry.state = LiveState::Known(UserState::Idle);
             }
@@ -172,7 +174,7 @@ pub async fn update_position(
     };
 
     if let Some(LiveState::Known(state)) = new_state {
-        println!("[{username}] stato -> {state:?}");
+        crate::detail!("[{username}] stato -> {state:?}");
         broadcast_state_change(clients, username, state).await;
     }
 
@@ -225,6 +227,7 @@ async fn broadcast_state_change(clients: &Clients, username: &str, new_state: Us
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::timing::DEFAULT_IDLE_THRESHOLD_SECONDS as IDLE_THRESHOLD_SECONDS;
     use std::sync::atomic::{AtomicI64, Ordering};
 
     /// Orologio simulato per i test: parte da un valore fisso e si avanza

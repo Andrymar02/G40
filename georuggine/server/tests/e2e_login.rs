@@ -267,7 +267,7 @@ async fn e2e_chat_utente_inesistente_non_crasha() {
 
     // Simula l'operatore del server che sbaglia nome utente
     // Scriviamo il comando seguito dall'invio (\n)
-    writeln!(server_stdin, "/msg utente_fantasma Ciao, ci sei?").unwrap();
+    writeln!(server_stdin, "/to utente_fantasma Ciao, ci sei?").unwrap();
 
     sleep(Duration::from_millis(500)).await;
 
@@ -433,7 +433,7 @@ async fn e2e_messaggio_diretto_valido_arriva_al_destinatario() {
 
     // AZIONE: l'operatore del server manda un messaggio diretto a carol,
     // che e' davvero connessa.
-    writeln!(server_stdin, "/msg carol Ciao Carol, ci sei?").unwrap();
+    writeln!(server_stdin, "/to carol Ciao Carol, ci sei?").unwrap();
 
     // VERIFICA: carol deve ricevere esattamente quel messaggio, come Direct.
     let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
