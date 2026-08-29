@@ -24,6 +24,9 @@ Comandi della console operatore:
   /users                        elenco degli utenti connessi
   /help                         mostra questo elenco";
 
+/// Uso del comando di popolamento dello storico (solo in modalità demo).
+pub const SEED_USAGE: &str = "Uso: /seed <utente> <giorni>  (storico finto, solo per la demo)";
+
 /// Quanti punti del tragitto stampare per esteso prima di riassumere.
 /// Con un campione ogni 30 secondi una giornata intera ne produce migliaia:
 /// riversarli tutti sul terminale renderebbe illeggibile il resto del report.
@@ -46,6 +49,8 @@ pub enum ConsoleCommand<'a> {
     Users,
     /// `/help`
     Help,
+    /// `/seed <utente> <giorni>`: solo in modalità demo.
+    Seed { username: &'a str, days: i64 },
     /// Riga riconosciuta ma usata male: si stampa questo messaggio.
     Usage(&'static str),
 }
@@ -87,6 +92,19 @@ pub fn parse_console_line(line: &str) -> Option<ConsoleCommand<'_>> {
 
         "/help" => ConsoleCommand::Help,
 
+        // Esiste solo in modalità demo: fuori da lì la riga cade nel ramo
+        // "comando non riconosciuto" come qualsiasi altro refuso, così il
+        // comando non compare nemmeno per sbaglio in esecuzione normale.
+        "/seed" if crate::demo::enabled() => match rest.split_once(char::is_whitespace) {
+            Some((username, days)) => match days.trim().parse::<i64>() {
+                Ok(days) if days > 0 && !username.is_empty() => {
+                    ConsoleCommand::Seed { username, days }
+                }
+                _ => ConsoleCommand::Usage(SEED_USAGE),
+            },
+            None => ConsoleCommand::Usage(SEED_USAGE),
+        },
+
         // Qualunque altra cosa: né un comando noto né un invio implicito.
         _ => ConsoleCommand::Usage(
             "comando non riconosciuto: usa /all per scrivere a tutti, /help per l'elenco",
@@ -123,7 +141,9 @@ pub fn format_distance(meters: f64) -> String {
         return "n/d".to_string();
     }
     if meters.abs() < 1000.0 {
-        format!("{meters:.0} m")
+        // `meters + 0.0` normalizza il meno zero: senza, un tragitto vuoto
+        // stampa "-0 m", che sembra un difetto.
+        format!("{:.0} m", meters + 0.0)
     } else {
         format!("{:.2} km", meters / 1000.0)
     }
