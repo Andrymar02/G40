@@ -1,3 +1,4 @@
+mod cpu_log;
 mod session;
 mod state;
 mod users;
@@ -68,6 +69,8 @@ async fn main() -> io::Result<()> {
     let tracking: SharedTracking = new_tracking();
 
     println!("Server in ascolto su {bind_addr}");
+
+    tokio::spawn(cpu_log::run());
 
     // Il loop di accept gira in un task a parte: il task principale resta
     // libero per la console dell'operatore (broadcast/diretto), che deve

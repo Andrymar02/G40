@@ -30,3 +30,6 @@ ORGANIZZAZIONE-2.pdf
 
 # Temporaneo della scrittura atomica dello storage utenti (users.rs)
 users.json.tmp
+
+# Temporaneo CPU usage
+cpu_usage-log
