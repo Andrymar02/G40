@@ -39,12 +39,16 @@ Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimba
 - Accetta connessioni su un indirizzo configurabile (default `0.0.0.0:8080`, sovrascrivibile: `cargo run -p server -- <indirizzo:porta>`), un task `tokio::spawn` per client.
 - **Autenticazione** (`users.rs`): `UserStore` con `HashMap<String, String>` (username → password **in chiaro**, scelta deliberata: vedi limitazioni sotto) persistito su `users.json`. Username duplicato → `RegisterErr`; credenziali errate → `LoginErr`. Username e password sono validati (non vuoti, max 64 caratteri, username solo `[A-Za-z0-9_-]`). Un `users.json` **corrotto ferma l'avvio** invece di far ripartire il server con un database vuoto, che alla prima registrazione sovrascriverebbe le credenziali esistenti.
 - **Registro sessioni** (`session.rs`, ✅): ogni connessione riceve un `SessionId` univoco alla accept. Un secondo login con lo stesso username viene **rifiutato** (vince chi è entrato per primo); logout e pulizia dei canali chiusi rimuovono una voce solo se l'id combacia, così una connessione che termina in ritardo non può sfrattare la sessione che nel frattempo ha preso quell'username. Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf`; i lock si tengono solo per lookup/clone del `Sender`, mai durante la scrittura in rete.
+  - **Timeout di inattività (90 s)**: una connessione che non manda nulla per tre intervalli di posizione consecutivi viene chiusa e il suo username liberato. Serve per il client che sparisce a livello di rete (cavo staccato, wifi caduto, VM sospesa) o resta congelato: il processo non muore, il kernel non manda il FIN, e senza timeout la sessione resterebbe registrata a tempo indeterminato — `SO_KEEPALIVE` è spento di default e il primo sondaggio TCP arriverebbe comunque dopo due ore.
 - **Macchina a stati live** (`state.rs`, ✅): traccia per utente ultima posizione nota e stato (`Disconnected`/`Idle`/`Moving`).
   - Transizioni: prima posizione mai ricevuta → `Idle`; coordinate cambiate → `Moving`; coordinate ferme da ≥3 minuti (`IDLE_THRESHOLD_SECONDS`) → `Idle`; disconnessione → `Disconnected`. Notifica `StateChanged` agli altri client solo quando lo stato cambia davvero.
   - **Orologio del server**, non timestamp del client: le transizioni usano un trait `Clock` (`SystemClock` in produzione, un orologio simulato nei test) — un client con l'orologio sbagliato non può falsare le transizioni.
   - **Validazione coordinate**: `lat`/`lon` fuori range (o `NaN`/infinito) vengono scartate, loggate, e non toccano lo stato.
   - 6 test automatici (transizioni, validazione, disconnessione) — `cargo test -p server`, nessuno aspetta 3 minuti reali grazie all'orologio simulato.
-- **Console operatore** (`admin_console` in `main.rs`, ✅): legge righe da stdin del *processo server*. Testo libero → broadcast a tutti i client connessi; `/msg <utente> <testo>` → diretto a un singolo utente. È l'unica sorgente di `Broadcast`/`Direct`.
+- **Console operatore** (`admin_console` in `main.rs`, parsing e formattazione in `console.rs`, ✅): legge righe da stdin del *processo server*. È l'unica sorgente di `Broadcast`/`Direct`.
+  - `/all <testo>` → a tutti i client connessi; `/to <utente> <testo>` → a un solo utente; `/stats <utente> <day|week|month|custom start end>` → report di movimento; `/users` → elenco dei connessi; `/help` → elenco dei comandi.
+  - **Ogni invio è esplicito**: il testo libero non è più un broadcast implicito. Prima lo era, e un comando scritto male (`/user` invece di `/users`) veniva spedito a tutti i client invece di segnalare l'errore.
+  - Il report di `/stats` è formattato per la lettura (distanze in m/km, durate in `1h 05m`, velocità in km/h, istanti nel fuso di Roma) e mostra le quattro grandezze chieste dalla consegna: tragitto percorso, velocità media, durata del movimento e durata delle pause.
   - **Limite noto**: se lo stdin del processo non è un terminale interattivo (es. lanciato in background senza input), la console legge EOF subito e il server termina. Da rivedere se serve far girare il server senza operatore collegato.
 
 ### `client` (🟡 interattivo, funzionante)
@@ -68,19 +72,75 @@ Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimba
 ## Come si esegue
 
 ```bash
-# terminale 1: server (indirizzo:porta opzionale, default 0.0.0.0:8080)
+# terminale 1: server
+# argomenti opzionali: <indirizzo:porta> (default 0.0.0.0:8080) e <file utenti> (default users.json)
 cargo run -p server
 cargo run -p server -- 127.0.0.1:9090
+cargo run -p server -- 127.0.0.1:9090 /tmp/prova-utenti.json
 
 # terminale 2: registra un utente (una tantum)
-cargo run -p client -- register alice pw1
+cargo run -p client -- register alice password-alice
 
 # poi login (resta connesso in chat + invio posizione)
-cargo run -p client -- login alice pw1
-cargo run -p client -- login alice pw1 127.0.0.1:9090   # indirizzo custom
+cargo run -p client -- login alice password-alice
+cargo run -p client -- login alice password-alice 127.0.0.1:9090   # indirizzo custom
 ```
 
-In chat: testo libero → mandato al server (`ChatToServer`); `/quit` → esce. Sul terminale del server: testo libero → broadcast a tutti; `/msg <utente> <testo>` → diretto a un utente.
+Vincoli sulle credenziali (vedi `users.rs`): username non vuoto, massimo 64 caratteri, soli
+caratteri `[A-Za-z0-9_-]`; password fra 4 e 64 caratteri. Una password di 3 caratteri viene
+rifiutata con `RegisterErr`.
+
+**La prima posizione arriva dopo 30 secondi, non subito**: il task che le invia attende un
+intervallo prima del primo campione. Fino ad allora il server non ha nulla da cui dedurre uno
+stato, quindi non compare nessun `StateChanged` e `/stats` riporta zero campioni.
+
+In chat: testo libero → mandato al server (`ChatToServer`); `/quit` → esce. Sul terminale del server: `/all <testo>` → a tutti; `/to <utente> <testo>` → a un utente; `/stats`, `/users`, `/help` (vedi sopra).
+
+### Output del server
+
+Di default il server stampa **solo** l'intestazione d'avvio, le risposte ai comandi della
+console e i propri guasti (avvio interrotto, errore in accept). Registrazioni, login,
+disconnessioni, singole posizioni, cambi di stato e messaggi degli utenti non compaiono: se
+non digiti nulla, il terminale resta fermo. Prima ogni evento di rete produceva una riga, e
+con due o tre client il terminale scorreva da solo.
+
+Per riavere la traccia completa:
+
+```bash
+GEORUGGINE_VERBOSE=1 cargo run -p server
+```
+
+Accetta `1`, `true`, `yes`, `si`, `on`; `0` e `false` spengono. Quando è attivo lo annuncia
+all'avvio. Per osservare lo stato senza il dettaglio si usano `/users` e `/stats`.
+
+### Tempi accorciati per le prove manuali
+
+I valori della consegna (posizione ogni 30 s, ritorno a `Idle` dopo 3 minuti) rendono
+impraticabile la verifica a mano: un giro completo richiede quattro minuti. Tre variabili
+d'ambiente li accorciano **senza cambiare i default**, definite in `common/src/timing.rs`:
+
+| Variabile | La legge | Default | Accorcia |
+|---|---|---|---|
+| `GEORUGGINE_POSITION_INTERVAL` | client | 30 s | invio della posizione |
+| `GEORUGGINE_IDLE_THRESHOLD` | server | 180 s | ritorno a `Idle` |
+| `GEORUGGINE_CLIENT_TIMEOUT` | server | 90 s | timeout di inattività |
+
+Ognuna la legge **un processo solo**: impostarle tutte in un terminale unico non funziona.
+
+```bash
+# terminale del server
+GEORUGGINE_IDLE_THRESHOLD=6 GEORUGGINE_CLIENT_TIMEOUT=10 cargo run -p server
+
+# terminali dei client
+export GEORUGGINE_POSITION_INTERVAL=2
+```
+
+Così un giro completo con due utenti, entrambe le transizioni di stato e `/stats` popolato
+sta in una ventina di secondi. Ogni override attivo viene **annunciato all'avvio**, perché
+una demo con tempi accorciati non deve poter passare inosservata. Valori non numerici o zero
+vengono rifiutati con un messaggio e si torna al default.
+
+**Per la demo e per le misure del report: nessuna variabile impostata.**
 
 Test automatici:
 ```bash
@@ -110,7 +170,7 @@ Vedi `ORGANIZZAZIONE.md` per il piano completo. In sintesi, restano tre aree ind
 
 - **Storico posizioni e analisi movimento** (tragitto, velocità media, durata movimento/pause, su giorno/settimana/mese) — non iniziato, proprietà di Viorel.
 - **Requisiti non funzionali**: log CPU ogni 2 minuti, build/misure su una seconda piattaforma, dimensione eseguibili — non iniziato, proprietà di Alice.
-- **Lato server**: persistenza atomica dello storage utenti, comandi aggiuntivi alla console (`/all`, `/to`, `/stats`) — proprietà di Francesco. Gestione sessioni e login simultanei: ✅ fatto (`session.rs`); `/users`: ✅ fatto.
+- **Lato server** — proprietà di Francesco: ✅ tutto completato. Gestione sessioni e login simultanei (`session.rs`), persistenza atomica dello storage utenti (`users.rs`), console operatore completa con `/all`, `/to`, `/stats`, `/users`, `/help` (`console.rs`), timeout di inattività sulle connessioni.
 
 **Decisioni già prese come gruppo:**
 - **Nessun hashing delle password**: restano in chiaro, in memoria e su `users.json`. La consegna non pone requisiti di sicurezza (chiede solo account e password in fase di registrazione) e chiede invece attenzione a dimensione dell'eseguibile e consumo di CPU, che una funzione di hashing peggiorerebbe. Di conseguenza tutto viaggia in chiaro sulla rete, password del messaggio `Login` incluse: niente TLS.
