@@ -14,7 +14,10 @@ use tokio::time::{Duration, sleep};
 /// Intervallo di invio della posizione, come richiesto dalla consegna
 /// ("la posizione di ciascun utente viene trasmessa al server ogni 30
 /// secondi").
-const POSITION_INTERVAL_SECONDS: u64 = 30;
+/// Intervallo fra due invii di posizione. Il valore della consegna (30 s)
+/// vive in `common::timing`, insieme all'override da variabile d'ambiente
+/// che serve per le prove manuali.
+use common::timing;
 
 /// Capacità del channel condiviso tra chi genera `ClientMessage` (loop chat
 /// da stdin, task di posizione) e il `writer_task` che li scrive sul socket.
@@ -188,8 +191,12 @@ async fn run_session(server_addr: &str, username: &str, password: &str) -> Sessi
     println!("Connesso. Scrivi un testo e premi invio per mandarlo al server,");
     println!("'/quit' per uscire. Il server può rispondere in broadcast o in diretto.");
     println!(
-        "La posizione (simulata) viene inviata automaticamente ogni {POSITION_INTERVAL_SECONDS}s."
+        "La posizione (simulata) viene inviata automaticamente ogni {}s.",
+        timing::position_interval().as_secs()
     );
+    for avviso in timing::client_overrides() {
+        println!("{avviso}");
+    }
 
     // Split del socket in due metà indipendenti: una per leggere ciò che
     // manda il server, una per scrivere. Un solo task (`writer_task`)
@@ -287,7 +294,7 @@ async fn writer_task(mut write_half: OwnedWriteHalf, mut rx: mpsc::Receiver<Clie
     }
 }
 
-/// Manda un `PositionUpdate` ogni [`POSITION_INTERVAL_SECONDS`], usando
+/// Manda un `PositionUpdate` a ogni [`timing::position_interval`], usando
 /// `simulator::Simulator` per calcolare la prossima posizione: questa
 /// funzione si occupa solo della parte di rete (temporizzazione, timestamp,
 /// invio sul channel), non di come si generano le coordinate — quella
@@ -297,7 +304,7 @@ async fn send_position_updates(tx: mpsc::Sender<ClientMessage>, username: String
     let mut sim = Simulator::for_user(&username);
 
     loop {
-        sleep(Duration::from_secs(POSITION_INTERVAL_SECONDS)).await;
+        sleep(timing::position_interval()).await;
 
         let (lat, lon) = sim.next_position();
         let timestamp = SystemTime::now()
