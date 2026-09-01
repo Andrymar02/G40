@@ -1,4 +1,5 @@
 mod console;
+mod cpu_log;
 mod demo;
 #[macro_use]
 mod logging;
@@ -104,6 +105,8 @@ async fn main() -> io::Result<()> {
     if let Some(avviso) = demo::startup_notice() {
         println!("{avviso}");
     }
+
+    tokio::spawn(cpu_log::run());
 
     // Il loop di accept gira in un task a parte: il task principale resta
     // libero per la console dell'operatore (broadcast/diretto), che deve
