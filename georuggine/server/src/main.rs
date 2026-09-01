@@ -248,6 +248,16 @@ async fn admin_console(clients: Clients, tracking: SharedTracking, clock: Shared
                          riavvia il server per ripartire da uno storico vuoto,\n\
                          oppure usa un altro utente."
                     ),
+                    // L'utente connesso ha gia' una sessione aperta nel
+                    // tracking, e il repository ne ammette una sola per
+                    // utente: e' l'invariante giusta, ma l'errore grezzo
+                    // non dice cosa fare.
+                    Err(demo::SeedError::Tracking(
+                        server::tracking::TrackingError::SessionAlreadyActive,
+                    )) => println!(
+                        "{username} è connesso adesso: lo storico va generato PRIMA del suo login.\n\
+                         Fallo uscire (/quit sul suo client) e ripeti, oppure genera un altro utente."
+                    ),
                     Err(demo::SeedError::Tracking(error)) => {
                         println!("generazione fallita: {error:?}")
                     }
