@@ -183,12 +183,11 @@ pub async fn update_position(
     };
 
     if let Some(LiveState::Known(state)) = new_state {
-        // Stampata sempre, non solo col dettaglio attivo: da quando lo
-        // stato non viene piu' trasmesso ai client, la console
-        // dell'operatore e' l'unico posto in cui si vede. Era una riga
-        // ridondante finche' gli utenti la ricevevano; ora e' la sola
-        // manifestazione visibile della macchina a stati.
-        println!("[{username}] stato -> {state:?}");
+        // Nel dettaglio, come gli altri eventi automatici: la console deve
+        // restare ferma finche' l'operatore non chiede qualcosa. Lo stato
+        // corrente si legge su richiesta con `/users`, che lo mostra per
+        // ogni utente connesso (vedi `current_state`).
+        crate::detail!("[{username}] stato -> {state:?}");
     }
 
     true
@@ -200,6 +199,19 @@ pub async fn update_position(
 /// o mai loggato/mai presente in mappa), non c'è nessuno stato pubblico da
 /// revocare: nessun client ha mai saputo che fosse "online", quindi niente
 /// da notificare.
+/// Stato corrente di `username`, se ne e' gia' stato osservato uno.
+///
+/// `None` significa due cose diverse che alla console interessano allo
+/// stesso modo: utente mai visto, oppure connesso ma senza ancora una
+/// posizione ricevuta (i primi 30 secondi dopo il login).
+pub async fn current_state(positions: &Positions, username: &str) -> Option<UserState> {
+    let guard = positions.lock().await;
+    match guard.get(username).map(|record| &record.state) {
+        Some(LiveState::Known(state)) => Some(state.clone()),
+        _ => None,
+    }
+}
+
 pub async fn mark_disconnected(positions: &Positions, username: &str) {
     let changed = {
         let mut guard = positions.lock().await;

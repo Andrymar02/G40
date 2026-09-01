@@ -142,7 +142,7 @@ async fn main() -> io::Result<()> {
         });
     }
 
-    admin_console(clients, tracking, clock).await;
+    admin_console(clients, positions, tracking, clock).await;
     Ok(())
 }
 
@@ -187,7 +187,28 @@ async fn build_stats_report(
     tracking
         .movement_report(username, period, now_utc)
         .await
-        .map_err(|error| format!("{error:?}"))
+        .map_err(spiega_errore_statistiche)
+}
+
+/// Traduce un errore del modulo di tracking in una frase utile.
+///
+/// Prima si stampava il nome della variante (`InvalidPeriod`), che dice a
+/// chi conosce il codice cos'e' successo e a nessun altro cosa fare.
+fn spiega_errore_statistiche(error: server::tracking::TrackingError) -> String {
+    use server::tracking::TrackingError::*;
+    match error {
+        InvalidPeriod => {
+            "intervallo non valido: l'istante iniziale deve precedere quello finale".to_string()
+        }
+        UnknownSession
+        | SessionNotActive
+        | SessionAlreadyExists
+        | SessionAlreadyActive
+        | SessionUserMismatch
+        | InvalidSessionTimestamp => {
+            format!("errore interno nello storico delle posizioni: {error:?}")
+        }
+    }
 }
 
 /// Console dell'operatore lato server: legge righe da stdin del processo
@@ -196,7 +217,12 @@ async fn build_stats_report(
 /// consegna, la scelta broadcast-vs-diretto spetta al server, non a un
 /// client che indica un destinatario (i messaggi che i client mandano con
 /// `ChatToServer` restano infatti solo lato server, vedi `handle_client`).
-async fn admin_console(clients: Clients, tracking: SharedTracking, clock: SharedClock) {
+async fn admin_console(
+    clients: Clients,
+    positions: Positions,
+    tracking: SharedTracking,
+    clock: SharedClock,
+) {
     println!("{}", console::CONSOLE_HELP);
 
     let stdin = tokio::io::stdin();
@@ -216,6 +242,10 @@ async fn admin_console(clients: Clients, tracking: SharedTracking, clock: Shared
                 let now_utc = clock.now_secs();
                 match build_stats_report(&tracking, args, now_utc).await {
                     Ok(report) => println!("{}", console::format_report(&report)),
+                    // Le righe d'uso spiegano gia' cosa scrivere: anteporre
+                    // "statistiche non disponibili" le trasformerebbe in
+                    // "statistiche non disponibili: Uso: /stats ...".
+                    Err(error) if error.starts_with("Uso:") => println!("{error}"),
                     Err(error) => println!("statistiche non disponibili: {error}"),
                 }
             }
@@ -225,7 +255,17 @@ async fn admin_console(clients: Clients, tracking: SharedTracking, clock: Shared
                 if connected.is_empty() {
                     println!("nessun utente connesso");
                 } else {
-                    println!("connessi ({}): {}", connected.len(), connected.join(", "));
+                    println!("connessi ({}):", connected.len());
+                    for username in connected {
+                        // Lo stato si legge qui e non arriva piu' da solo:
+                        // la console resta ferma finche' non le si chiede
+                        // qualcosa.
+                        let stato = match state::current_state(&positions, &username).await {
+                            Some(stato) => format!("{stato:?}"),
+                            None => "in attesa della prima posizione".to_string(),
+                        };
+                        println!("  {username:<20} {stato}");
+                    }
                 }
             }
 
@@ -234,6 +274,16 @@ async fn admin_console(clients: Clients, tracking: SharedTracking, clock: Shared
             ConsoleCommand::Seed { username, days } => {
                 let now_utc = clock.now_secs();
                 match demo::seed(&tracking, username, days, now_utc).await {
+                    Ok(riepilogo) if days > demo::MAX_DAYS => println!(
+                        "richiesti {days} giorni, limitati a {} (la retention dello storico non\n\
+                         ne conserva di piu'): {} campioni in {} sessioni,\n\
+                         dal {} al {}",
+                        demo::MAX_DAYS,
+                        riepilogo.samples,
+                        riepilogo.sessions,
+                        console::format_instant(riepilogo.first_utc),
+                        console::format_instant(riepilogo.last_utc),
+                    ),
                     Ok(riepilogo) => println!(
                         "storico NON reale generato per {username}: {} campioni in {} sessioni,\n\
                          dal {} al {}\nProva ora: /stats {username} day | week | month",
@@ -448,10 +498,17 @@ async fn handle_client(
                 }
             }
             ClientMessage::ChatToServer { text } => match &username {
-                // Solo ricevuto e loggato: la consegna non chiede che un
-                // messaggio mandato da un utente venga girato ad altri
-                // utenti, quindi qui non c'è nessun broadcast/inoltro.
-                Some(u) => detail!("[{addr}] messaggio da {u}: {text}"),
+                // Stampato SEMPRE, anche senza il dettaglio attivo: la
+                // consegna richiede che "ogni utente deve poter inviare
+                // messaggi testuali al server", e un messaggio che
+                // l'operatore non vede non è stato consegnato a nessuno.
+                // È l'unica cosa che un utente può far comparire sulla
+                // console, ed è voluto: gli eventi automatici restano
+                // silenziosi, quello che una persona scrive no.
+                //
+                // Non viene inoltrato ad altri utenti: la consegna descrive
+                // solo utente->server e server->utente.
+                Some(u) => println!("[{u}] messaggio: {text}"),
                 None => detail!("[{addr}] messaggio ignorato: utente non loggato"),
             },
         }
