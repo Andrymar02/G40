@@ -135,23 +135,15 @@ impl SessionRegistry {
     }
 
     /// Manda `msg` a tutte le sessioni attive.
+    ///
+    /// Esisteva anche una variante che saltava un utente, usata dalle
+    /// notifiche di cambio stato agli altri client: quelle non vengono piu'
+    /// inviate (vedi `state.rs`), quindi non serve piu' escludere nessuno.
     pub async fn broadcast(&self, msg: ServerMessage) {
-        self.broadcast_inner(None, msg).await;
-    }
-
-    /// Come [`broadcast`](Self::broadcast), ma salta `exclude` — serve alle
-    /// notifiche di cambio stato, che non vanno rimandate all'utente che le
-    /// ha causate.
-    pub async fn broadcast_except(&self, exclude: &str, msg: ServerMessage) {
-        self.broadcast_inner(Some(exclude), msg).await;
-    }
-
-    async fn broadcast_inner(&self, exclude: Option<&str>, msg: ServerMessage) {
         let targets: Vec<(String, SessionId, mpsc::Sender<ServerMessage>)> = {
             let guard = self.sessions.lock().await;
             guard
                 .iter()
-                .filter(|(username, _)| Some(username.as_str()) != exclude)
                 .map(|(username, session)| (username.clone(), session.id, session.sender.clone()))
                 .collect()
         };
@@ -328,31 +320,6 @@ mod tests {
 
         assert!(rx_viva.recv().await.is_some());
         assert_eq!(registry.connected_usernames().await, vec!["alice"]);
-    }
-
-    #[tokio::test]
-    async fn broadcast_except_salta_lutente_indicato() {
-        let registry = SessionRegistry::new();
-        let (tx_alice, mut rx_alice) = fake_session();
-        let (tx_bob, mut rx_bob) = fake_session();
-
-        let id_alice = registry.allocate_session();
-        let id_bob = registry.allocate_session();
-        registry.login("alice", id_alice, tx_alice).await.unwrap();
-        registry.login("bob", id_bob, tx_bob).await.unwrap();
-
-        registry
-            .broadcast_except(
-                "alice",
-                ServerMessage::Broadcast {
-                    from: "server".to_string(),
-                    text: "ciao".to_string(),
-                },
-            )
-            .await;
-
-        assert!(rx_bob.recv().await.is_some());
-        assert!(rx_alice.try_recv().is_err());
     }
 
     #[tokio::test]

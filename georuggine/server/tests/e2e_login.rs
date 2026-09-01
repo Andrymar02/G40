@@ -141,7 +141,7 @@ async fn e2e_doppio_login_rifiutato() {
 }
 
 #[tokio::test]
-async fn e2e_disconnessione_notificata_agli_altri() {
+async fn e2e_disconnessione_non_notificata_agli_altri() {
     let addr = "127.0.0.1:8092";
     let users_file = temp_users_file("disconnessione");
     let (server_process, mut client_a) = spawn_server(addr, &users_file).await;
@@ -222,33 +222,23 @@ async fn e2e_disconnessione_notificata_agli_altri() {
     // Alice perde la connessione
     drop(client_a);
 
-    // VERIFICA: Bob deve ricevere un ServerMessage::StateChanged
-    // Usiamo un timeout di 3 secondi per evitare che il test si blocchi all'infinito se fallisce
-    let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let msg = read_message::<_, ServerMessage>(&mut client_b)
-                .await
-                .unwrap();
-
-            // Controlliamo se è il messaggio che aspettiamo
-            if let ServerMessage::StateChanged {
-                username,
-                new_state,
-            } = msg
-            {
-                // new_state è un enum (Disconnected, Idle, Moving). Lo convertiamo in stringa per comodità
-                if username == "alice" && format!("{:?}", new_state).contains("Disconnected") {
-                    return true; // Trovato. Esce dal loop e dal timeout
-                }
-            }
-        }
-    })
+    // VERIFICA: bob NON deve ricevere nulla. Il test controllava l'opposto,
+    // quando il server mandava uno `StateChanged` in broadcast agli altri
+    // client; quella notifica è stata rimossa perché la consegna chiede che
+    // sia il sistema a gestire lo stato di ogni utente e descrive la
+    // comunicazione solo come server->utente e utente->server. Che un utente
+    // sappia quando un altro si disconnette non è richiesto, ed era anche
+    // incoerente con la scelta di non inoltrare la chat fra utenti.
+    let ricevuto = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut client_b),
+    )
     .await;
 
-    // Se il timeout scade, timeout_result sarà un Err
     assert!(
-        timeout_result.is_ok(),
-        "Bob non ha mai ricevuto la notifica di disconnessione di Alice!"
+        ricevuto.is_err(),
+        "bob non deve sapere che alice si è disconnessa, ha ricevuto: {:?}",
+        ricevuto.unwrap()
     );
 
     cleanup_users_file(&users_file);
@@ -288,7 +278,7 @@ async fn e2e_chat_utente_inesistente_non_crasha() {
 }
 
 #[tokio::test]
-async fn e2e_aggiornamento_posizione_notifica_stato() {
+async fn e2e_posizione_non_notificata_agli_altri() {
     let addr = "127.0.0.1:8094";
     let users_file = temp_users_file("posizione_stato");
     let (server_process, mut client_a) = spawn_server(addr, &users_file).await;
@@ -366,30 +356,20 @@ async fn e2e_aggiornamento_posizione_notifica_stato() {
     .await
     .unwrap();
 
-    // VERIFICA: bob deve ricevere lo StateChanged di alice -> Idle (prima
-    // posizione mai ricevuta = notificata, vedi state::tests in state.rs).
-    let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let msg = read_message::<_, ServerMessage>(&mut client_b)
-                .await
-                .unwrap();
-
-            if let ServerMessage::StateChanged {
-                username,
-                new_state,
-            } = msg
-                && username == "alice"
-                && format!("{:?}", new_state).contains("Idle")
-            {
-                return true;
-            }
-        }
-    })
+    // VERIFICA: bob NON deve ricevere nulla. Lo stato di alice viene
+    // calcolato e conservato dal server — resta visibile all'operatore dalla
+    // console e da `/users`/`/stats` — ma non viene trasmesso agli altri
+    // utenti: vedi la nota in `server/src/state.rs`.
+    let ricevuto = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut client_b),
+    )
     .await;
 
     assert!(
-        timeout_result.is_ok(),
-        "Bob non ha mai ricevuto la notifica del cambio di stato di Alice!"
+        ricevuto.is_err(),
+        "bob non deve sapere che alice si è mossa, ha ricevuto: {:?}",
+        ricevuto.unwrap()
     );
 
     cleanup_users_file(&users_file);

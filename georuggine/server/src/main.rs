@@ -424,7 +424,7 @@ async fn handle_client(
                         };
 
                         let accepted =
-                            state::update_position(&clients, &positions, &clock, u, lat, lon).await;
+                            state::update_position(&positions, &clock, u, lat, lon).await;
 
                         if accepted {
                             let received_at = clock.now_secs();
@@ -470,7 +470,7 @@ async fn handle_client(
                 detail!("[{addr}] chiusura tracking fallita per {u}: {error:?}");
             }
 
-            state::mark_disconnected(&clients, &positions, &u).await;
+            state::mark_disconnected(&positions, &u).await;
         } else {
             detail!("[{addr}] sessione {session_id} chiusa: {u} è già su un'altra sessione");
         }
