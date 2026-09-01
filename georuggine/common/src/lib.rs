@@ -13,6 +13,8 @@
 //!    Qui si usa length-prefixed (4 byte di lunghezza + payload), vedi
 //!    [`framing`] per i dettagli e il perché.
 
+pub mod timing;
+
 use serde::{Deserialize, Serialize};
 
 /// Messaggi che il client può inviare al server.
