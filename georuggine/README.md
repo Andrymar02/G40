@@ -100,6 +100,19 @@ stato, quindi non compare nessun `StateChanged` e `/stats` riporta zero campioni
 
 In chat: testo libero → mandato al server (`ChatToServer`); `/quit` → esce. Sul terminale del server: `/all <testo>` → a tutti; `/to <utente> <testo>` → a un utente; `/stats`, `/users`, `/help` (vedi sopra).
 
+### Dimensione degli eseguibili
+
+Misurati con `cargo build --workspace --release` su Linux x86-64, senza `strip`:
+
+| Eseguibile | Dimensione |
+|---|---|
+| `server` | **2,11 MB** |
+| `client` | **1,30 MB** |
+
+Il server includeva l'intero database dei fusi orari IANA tirato dentro da `chrono-tz`:
+filtrandolo sul solo `Europe/Rome` è passato da 3,87 a 2,11 MB. Il filtro è in
+`.cargo/config.toml` e vale per ogni build, CI compresa.
+
 ### Output del server
 
 Di default il server stampa **solo** l'intestazione d'avvio, le risposte ai comandi della
@@ -173,6 +186,7 @@ Ogni push o PR verso `dev`/`main` passa da un workflow GitHub Actions (`.github/
 | Simulazione posizione | Generatore pseudo-casuale (xorshift a mano) | Nessuna dipendenza `rand` |
 | Fuso orario per giorno/settimana/mese | `Europe/Rome`, settimana da lunedì | Scelta esplicita richiesta da `ORGANIZZAZIONE.md`; gestisce anche il cambio ora legale |
 | Lettura CPU del processo | Crate `sysinfo` | Multipiattaforma senza codice ad hoc per Windows/Linux |
+| Fusi orari incorporati nell'eseguibile | Solo `Europe/Rome`, via `filter-by-regex` di `chrono-tz` | Il database IANA completo (circa 600 fusi) pesa 1,76 MB su un binario di 3,87: il progetto ne usa uno solo. Il filtro sta in `.cargo/config.toml`, non in una variabile da esportare a mano, così chiunque compili ottiene lo stesso eseguibile |
 
 ## Cosa manca / cosa cambierà (roadmap)
 

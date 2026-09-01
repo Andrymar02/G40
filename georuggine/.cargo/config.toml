@@ -1,0 +1,13 @@
+# Quali fusi orari incorporare nell'eseguibile.
+#
+# `chrono-tz` legge questa variabile nel proprio build script (feature
+# `filter-by-regex`, vedi server/Cargo.toml). Senza filtro finisce nel
+# binario l'intero database IANA: circa 600 fusi con tutte le regole
+# storiche di ora legale, quasi 1,8 MB, mentre il progetto ne usa uno solo
+# per risolvere i periodi di `/stats`.
+#
+# Sta qui e non nelle istruzioni di build apposta: una variabile d'ambiente
+# che ognuno deve ricordarsi di esportare produrrebbe eseguibili diversi a
+# seconda di chi compila, e le misure del report non sarebbero riproducibili.
+[env]
+CHRONO_TZ_TIMEZONE_FILTER = "Europe/Rome"
