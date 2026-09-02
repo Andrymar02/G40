@@ -2,8 +2,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::{
-    InMemoryPositionRepository, MovementReport, PositionRepository, PositionSample, ReportPeriod,
-    SessionId, TrackingError, build_movement_report, resolve_report_period,
+    FilePositionRepository, HISTORY_RETENTION_SECONDS, MovementReport, PositionRepository,
+    PositionSample, ReportPeriod, SessionId, TrackingError, build_movement_report,
+    resolve_report_period,
 };
 
 pub struct TrackingService<R> {
@@ -76,18 +77,30 @@ impl<R: PositionRepository> TrackingService<R> {
     }
 }
 
-pub type SharedTracking = Arc<TrackingService<InMemoryPositionRepository>>;
+/// Il tipo usato dal server vero: lo storico posizioni deve sopravvivere a
+/// un riavvio (richiesto dal professore in sede di revisione del progetto,
+/// oltre che utile di per sé), quindi qui il repository è quello persistito
+/// su file, non `InMemoryPositionRepository` — usato invece direttamente nei
+/// test che non hanno bisogno di sopravvivere a nulla (vedi `repository.rs`
+/// e il test qui sotto).
+pub type SharedTracking = Arc<TrackingService<FilePositionRepository>>;
 
-pub fn new_tracking() -> SharedTracking {
-    Arc::new(TrackingService::new(InMemoryPositionRepository::default()))
+/// Carica (o crea, se `path` non esiste ancora) lo storico posizioni dal
+/// file indicato. Fallisce se il file esiste ma è illeggibile o corrotto —
+/// vedi `FilePositionRepository::load` — cosi' un server che parte non
+/// rischia di ripartire silenziosamente da uno storico vuoto.
+pub fn new_tracking(path: &str) -> Result<SharedTracking, String> {
+    let repository = FilePositionRepository::load(path, HISTORY_RETENTION_SECONDS)?;
+    Ok(Arc::new(TrackingService::new(repository)))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::tracking::{
         GeoPoint, InMemoryPositionRepository, PositionSample, ReportPeriod, TrackingError,
-        TrackingService, new_tracking,
+        TrackingService,
     };
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn empty_repository_produces_empty_report_for_custom_period() {
@@ -208,7 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloned_tracking_handles_share_the_same_history() {
-        let tracking = new_tracking();
+        let tracking = Arc::new(TrackingService::new(InMemoryPositionRepository::default()));
         let connection_tracking = tracking.clone();
 
         connection_tracking

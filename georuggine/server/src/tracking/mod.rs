@@ -14,7 +14,8 @@ pub use model::{
     PositionSample, ReportPeriod, SessionId, TrackingSession,
 };
 pub use repository::{
-    HISTORY_RETENTION_SECONDS, InMemoryPositionRepository, PositionRepository, TrackingError,
+    FilePositionRepository, HISTORY_RETENTION_SECONDS, InMemoryPositionRepository,
+    PositionRepository, TrackingError,
 };
 
 pub use period::resolve_report_period;

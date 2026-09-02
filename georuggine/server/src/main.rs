@@ -32,6 +32,12 @@ pub(crate) use session::Clients;
 /// server` (di norma la radice del workspace).
 const USERS_FILE: &str = "users.json";
 
+/// File in cui persiste lo storico delle posizioni (sessioni + campioni),
+/// usato da `/stats`. Prima viveva solo in memoria e un riavvio del server
+/// lo azzerava: su richiesta del professore, in sede di revisione del
+/// progetto, si è aggiunta la stessa persistenza già in uso per gli utenti.
+const TRACKING_FILE: &str = "tracking_history.json";
+
 /// Indirizzo:porta di bind di default, usato se non se ne passa uno da riga
 /// di comando (`cargo run -p server -- <indirizzo:porta>`).
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
@@ -73,6 +79,7 @@ async fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let bind_addr = args.next().unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
     let users_file = args.next().unwrap_or_else(|| USERS_FILE.to_string());
+    let tracking_file = args.next().unwrap_or_else(|| TRACKING_FILE.to_string());
 
     // Uno storage utenti illeggibile ferma l'avvio: vedi `users::UserStore::load`.
     // Si carica prima del bind, per non lasciare aperta una porta su un
@@ -88,12 +95,24 @@ async fn main() -> io::Result<()> {
         }
     };
 
+    // Stesso principio dello storage utenti: un file di storico presente ma
+    // illeggibile/corrotto ferma l'avvio invece di far ripartire il server
+    // da uno storico vuoto, che alla prima scrittura lo cancellerebbe.
+    let tracking: SharedTracking = match new_tracking(&tracking_file) {
+        Ok(tracking) => tracking,
+        Err(reason) => {
+            eprintln!("Avvio interrotto: {reason}");
+            eprintln!(
+                "Controllare {tracking_file}: rimuoverlo solo se si accetta di perdere lo storico posizioni."
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+        }
+    };
+
     let listener = TcpListener::bind(&bind_addr).await?;
     let clients: Clients = SessionRegistry::new();
     let positions: Positions = state::new_positions();
     let clock: SharedClock = Arc::new(SystemClock);
-
-    let tracking: SharedTracking = new_tracking();
 
     println!("Server in ascolto su {bind_addr}");
     for avviso in common::timing::server_overrides() {
@@ -199,6 +218,12 @@ fn spiega_errore_statistiche(error: server::tracking::TrackingError) -> String {
     match error {
         InvalidPeriod => {
             "intervallo non valido: l'istante iniziale deve precedere quello finale".to_string()
+        }
+        PersistenceFailed => {
+            "scrittura dello storico su disco fallita: i dati restano validi per questa \
+             esecuzione ma un riavvio del server potrebbe perderli (controllare spazio/permessi \
+             sul file di storico)"
+                .to_string()
         }
         UnknownSession
         | SessionNotActive
@@ -613,9 +638,22 @@ mod stats_command_tests {
         );
     }
 
+    /// Percorso temporaneo univoco, stesso schema di `users::tests::temp_path`.
+    fn temp_tracking_file(name: &str) -> String {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("georuggine_stats_test_{name}_{unique}.json"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[tokio::test]
     async fn stats_command_builds_empty_custom_report() {
-        let tracking = new_tracking();
+        let path = temp_tracking_file("empty_report");
+        let tracking = new_tracking(&path).unwrap();
 
         let report = build_stats_report(&tracking, "alice custom 100 400", 999)
             .await
@@ -625,5 +663,8 @@ mod stats_command_tests {
         assert_eq!(report.period_start, 100);
         assert_eq!(report.period_end, 400);
         assert_eq!(report.sample_count, 0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.tmp"));
     }
 }

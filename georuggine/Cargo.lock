@@ -431,6 +431,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "common",
+ "serde",
  "serde_json",
  "sysinfo",
  "tokio",
