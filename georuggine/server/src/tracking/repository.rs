@@ -234,13 +234,26 @@ struct Snapshot {
     samples: HashMap<String, VecDeque<PositionSample>>,
 }
 
+/// Sotto questo intervallo, campioni successivi non forzano una nuova
+/// scrittura: si accumulano in memoria e vengono scritti alla prima
+/// occasione utile (il campione che fa scadere l'intervallo, oppure
+/// l'apertura/chiusura di una sessione, che scrivono sempre). Con un solo
+/// veicolo il comportamento non cambia quasi — manda una posizione ogni 30s
+/// comunque — ma con una flotta il vantaggio è che il tasso di scrittura
+/// resta limitato a una ogni `MIN_PERSIST_INTERVAL_SECONDS` indipendentemente
+/// da quanti veicoli mandano posizioni nello stesso istante, invece di una
+/// riscrittura per ciascuno.
+const MIN_PERSIST_INTERVAL_SECONDS: i64 = 30;
+
 /// Repository dello storico posizioni persistito su file, con lo stesso
 /// schema di scrittura atomica di `UserStore::save` (file temporaneo,
 /// `fsync`, `rename`). Tutta la logica di consultazione/potatura resta
 /// quella di `InMemoryPositionRepository`, che questo tipo avvolge e
-/// riporta su disco dopo ogni operazione che modifica lo stato.
+/// riporta su disco dopo ogni apertura/chiusura di sessione, e al più ogni
+/// `MIN_PERSIST_INTERVAL_SECONDS` per i campioni di posizione (vedi
+/// `insert_sample` sotto).
 ///
-/// SCELTA: si riscrive per intero lo stato a ogni operazione, invece di
+/// SCELTA: si riscrive per intero lo stato a ogni scrittura, invece di
 /// un log di sole aggiunte. È più semplice, coerente con `users.rs`, e a
 /// questa scala (una manciata di veicoli simulati, non una flotta reale)
 /// il costo resta trascurabile. Un log append-only scalerebbe meglio se lo
@@ -250,10 +263,15 @@ struct Snapshot {
 /// Il trait `PositionRepository` non è asincrono (vedi sopra), quindi la
 /// scrittura qui è sincrona (`std::fs`, non `tokio::fs`): per un file che
 /// cresce con l'attività di pochi veicoli e si scrive al più ogni 30
-/// secondi per utente, il tempo bloccato sul thread è trascurabile.
+/// secondi in tutto (non per utente, vedi sopra), il tempo bloccato sul
+/// thread resta trascurabile anche con più veicoli.
 pub struct FilePositionRepository {
     inner: InMemoryPositionRepository,
     path: String,
+    /// `received_at` dell'ultimo campione che ha effettivamente scritto su
+    /// disco. A 0 al primo avvio: il primissimo campione ricevuto scrive
+    /// sempre, qualunque sia `MIN_PERSIST_INTERVAL_SECONDS`.
+    last_persist_utc: i64,
 }
 
 impl FilePositionRepository {
@@ -305,6 +323,7 @@ impl FilePositionRepository {
         Ok(Self {
             inner,
             path: path.to_string(),
+            last_persist_utc: 0,
         })
     }
 
@@ -313,6 +332,18 @@ impl FilePositionRepository {
             sessions: self.inner.sessions_by_id.values().cloned().collect(),
             samples: self.inner.samples_by_username.clone(),
         }
+    }
+
+    /// `persist()` seguito da un aggiornamento di `last_persist_utc`: le
+    /// chiamate che devono scrivere sempre (apertura/chiusura sessione)
+    /// passano da qui invece che da `persist()` direttamente, cosi' anche
+    /// loro fanno ripartire la soglia di `insert_sample` — altrimenti un
+    /// campione arrivato subito dopo un login riscriverebbe il file una
+    /// seconda volta a distanza di pochi millisecondi.
+    fn persist_and_mark(&mut self, at: i64) -> io::Result<()> {
+        self.persist()?;
+        self.last_persist_utc = at;
+        Ok(())
     }
 
     /// Scrittura atomica: file temporaneo nella stessa directory (`rename`
@@ -352,7 +383,7 @@ impl PositionRepository for FilePositionRepository {
         self.inner
             .open_session(session_id, username, connected_at)?;
 
-        if self.persist().is_err() {
+        if self.persist_and_mark(connected_at).is_err() {
             // BUG CORRETTO: qui, a differenza di `close_session`/
             // `insert_sample`, la mutazione in memoria va annullata se il
             // salvataggio fallisce. Altrimenti la sessione appena aperta
@@ -379,12 +410,26 @@ impl PositionRepository for FilePositionRepository {
         disconnected_at: i64,
     ) -> Result<(), TrackingError> {
         self.inner.close_session(session_id, disconnected_at)?;
-        self.persist().map_err(|_| TrackingError::PersistenceFailed)
+        self.persist_and_mark(disconnected_at)
+            .map_err(|_| TrackingError::PersistenceFailed)
     }
 
+    /// A differenza di `open_session`/`close_session`, non scrive a ogni
+    /// chiamata: sotto `MIN_PERSIST_INTERVAL_SECONDS` dall'ultima scrittura
+    /// il campione resta solo in memoria (vedi il commento sulla costante).
+    /// La mutazione in memoria avviene comunque sempre: un client che legge
+    /// subito dopo (`/stats`) vede il campione anche se non è ancora su
+    /// disco, esattamente come già succede fra una scrittura e l'altra.
     fn insert_sample(&mut self, sample: &PositionSample) -> Result<(), TrackingError> {
         self.inner.insert_sample(sample)?;
-        self.persist().map_err(|_| TrackingError::PersistenceFailed)
+
+        let da_ultima_scrittura = sample.received_at() - self.last_persist_utc;
+        if da_ultima_scrittura < MIN_PERSIST_INTERVAL_SECONDS {
+            return Ok(());
+        }
+
+        self.persist_and_mark(sample.received_at())
+            .map_err(|_| TrackingError::PersistenceFailed)
     }
 
     fn samples_for_period(
@@ -1069,6 +1114,67 @@ mod file_repository_tests {
 
         assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
         assert!(std::path::Path::new(&path).exists());
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn campioni_ravvicinati_non_riscrivono_il_file_a_ogni_volta() {
+        let path = temp_path("throttle");
+
+        let mut repository = FilePositionRepository::load(&path, 1_000).unwrap();
+        repository.open_session(1, "pincopallo", 1000).unwrap();
+
+        let vicino = PositionSample::new(
+            String::from("pincopallo"),
+            1,
+            GeoPoint::try_new(45.0, 7.0).unwrap(),
+            1000 + MIN_PERSIST_INTERVAL_SECONDS - 1, // appena sotto la soglia
+            None,
+        );
+        repository.insert_sample(&vicino).unwrap();
+
+        // In memoria il campione c'è già: chi interroga questa stessa
+        // istanza (es. /stats subito dopo) lo vede comunque.
+        assert_eq!(
+            repository
+                .samples_for_period("pincopallo", 0, 3000)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Ma non è ancora su disco: un riavvio in questo istante lo perde.
+        let dopo_riavvio_immediato = FilePositionRepository::load(&path, 1_000).unwrap();
+        assert!(
+            dopo_riavvio_immediato
+                .samples_for_period("pincopallo", 0, 3000)
+                .unwrap()
+                .is_empty(),
+            "un campione sotto la soglia non deve ancora essere su disco"
+        );
+
+        let lontano = PositionSample::new(
+            String::from("pincopallo"),
+            1,
+            GeoPoint::try_new(45.0, 7.0).unwrap(),
+            1000 + MIN_PERSIST_INTERVAL_SECONDS, // esattamente alla soglia: scrive
+            None,
+        );
+        repository.insert_sample(&lontano).unwrap();
+
+        // La scrittura scaduta porta su disco anche "vicino", rimasto solo
+        // in memoria fino a questo momento: nessun campione perso, solo
+        // ritardato.
+        let dopo_seconda_scrittura = FilePositionRepository::load(&path, 1_000).unwrap();
+        assert_eq!(
+            dopo_seconda_scrittura
+                .samples_for_period("pincopallo", 0, 3000)
+                .unwrap()
+                .len(),
+            2,
+            "la scrittura che scade deve portare su disco anche i campioni accumulati prima"
+        );
 
         cleanup(&path);
     }
