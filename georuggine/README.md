@@ -31,16 +31,16 @@ georuggine/
 ### `common` — protocollo e framing (✅ implementato)
 
 - **`ClientMessage`**: `Login`, `Register`, `PositionUpdate { lat, lon, timestamp }`, `ChatToServer { text }`.
-- **`ServerMessage`**: `LoginOk`, `LoginErr`, `RegisterOk`, `RegisterErr`, `Broadcast { from, text }`, `Direct { from, text }`, `StateChanged { username, new_state }`.
-- **`UserState`**: `Disconnected`, `Idle`, `Moving`.
+- **`ServerMessage`**: `LoginOk`, `LoginErr`, `RegisterOk`, `RegisterErr`, `Broadcast { from, text }`, `Direct { from, text }`.
+- **`UserState`** (`Disconnected`/`Idle`/`Moving`): usato **solo lato server**, non compare in nessun messaggio del protocollo (vedi decisione sotto).
 - **Modulo `framing`**: serializzazione JSON + framing *length-prefixed* su TCP (4 byte di lunghezza big-endian + payload), asincrono. Cap `MAX_MESSAGE_SIZE` (1 MiB) contro payload dichiarati enormi.
 
 Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimbalzato ad altri utenti) e server→client in broadcast o diretto (decisi dal server, non da un client che indica un destinatario — vedi console operatore sotto).
 
 ### `server` (🟡 funzionante, non production-ready)
 
-- Accetta connessioni su un indirizzo configurabile (default `0.0.0.0:8080`, sovrascrivibile: `cargo run -p server -- <indirizzo:porta> [file_utenti]`), un task `tokio::spawn` per client.
-- **Autenticazione** (`users.rs`, ✅): `UserStore` con username → password **in chiaro** (scelta deliberata: vedi decisioni sotto), persistito su file JSON. Username duplicato → `RegisterErr`; credenziali errate → `LoginErr`. Username e password validati (non vuoti, max 64 caratteri, username solo `[A-Za-z0-9_-]`). Il salvataggio è **atomico** (file temporaneo + `fsync` + `rename`): un crash a metà scrittura non corrompe il file. Un file utenti **corrotto ferma l'avvio** invece di ripartire con un database vuoto, che alla prima registrazione sovrascriverebbe le credenziali esistenti.
+- Accetta connessioni su un indirizzo configurabile (default `0.0.0.0:8080`, sovrascrivibile: `cargo run -p server -- <indirizzo:porta> [file_utenti] [file_storico]`), un task `tokio::spawn` per client.
+- **Autenticazione** (`users.rs`, ✅): `UserStore` con username → password **in chiaro** (scelta deliberata: vedi decisioni sotto), persistito su file JSON. Username duplicato → `RegisterErr`; credenziali errate → `LoginErr`. Username e password validati (non vuoti, max 64 caratteri, username solo `[A-Za-z0-9_-]`). Il salvataggio è **atomico** (file temporaneo + `fsync` + `rename`): un crash a metà scrittura non corrompe il file. Un file utenti **corrotto ferma l'avvio** invece di ripartire con un database vuoto, che alla prima registrazione sovrascriverebbe le credenziali esistenti (stesso principio per il file di storico, vedi sotto).
 - **Registro sessioni** (`session.rs`, ✅): ogni connessione riceve un `SessionId` univoco alla accept. Un secondo login con lo stesso username viene **rifiutato** (vince chi è entrato per primo); logout e pulizia dei canali chiusi rimuovono una voce solo se l'id combacia, così una connessione che termina in ritardo non può sfrattare la sessione che nel frattempo ha preso quell'username. Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf`; i lock si tengono solo per lookup/clone del `Sender`, mai durante la scrittura in rete.
   - **Timeout di inattività (90 s)**: una connessione che non manda nulla per tre intervalli di posizione consecutivi viene chiusa e il suo username liberato. Serve per il client che sparisce a livello di rete (cavo staccato, wifi caduto, VM sospesa) o resta congelato: il processo non muore, il kernel non manda il FIN, e senza timeout la sessione resterebbe registrata a tempo indeterminato — `SO_KEEPALIVE` è spento di default e il primo sondaggio TCP arriverebbe comunque dopo due ore.
 - **Macchina a stati live** (`state.rs`, ✅): traccia per utente ultima posizione nota e stato (`Disconnected`/`Idle`/`Moving`).
@@ -48,8 +48,8 @@ Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimba
   - **Lo stato non viene trasmesso agli altri utenti**: resta lato server e si vede dalla console dell'operatore, che stampa ogni transizione (`[bob] stato -> Moving`) e lo espone con `/users` e `/stats`. Una versione precedente lo mandava in broadcast a tutti i client connessi: rimosso, vedi le decisioni sotto.
   - **Orologio del server**, non timestamp del client: le transizioni usano un trait `Clock` (`SystemClock` in produzione, un orologio simulato nei test).
   - **Validazione coordinate**: `lat`/`lon` fuori range (o `NaN`/infinito) vengono scartate, loggate, e non toccano lo stato.
-  - 6 test automatici (transizioni, validazione, disconnessione) — `cargo test -p server`, nessuno aspetta 3 minuti reali grazie all'orologio simulato.
-- **Storico posizioni e analisi movimento** (`tracking/`, ✅): ogni posizione valida ricevuta viene registrata in un repository in memoria (retention di default, pruning automatico). Calcolo distanze con formula di Haversine, segmentazione movimento/pausa, velocità media, durata movimento/pause. Query per **giorno/settimana/mese** risolte sul fuso `Europe/Rome` (settimana da lunedì, cambio ora legale gestito correttamente), oltre a un intervallo `custom` arbitrario. Esposto alla console operatore col comando `/stats`.
+  - Sei test della macchina a stati (transizioni, validazione, disconnessione) — `cargo test -p server`, nessuno aspetta 3 minuti reali grazie all'orologio simulato.
+- **Storico posizioni e analisi movimento** (`tracking/`, ✅): ogni posizione valida ricevuta viene registrata in un repository **persistito su file** (`tracking_history.json`, scrittura atomica come `users.json`, `load` all'avvio, retention 35 giorni, pruning automatico) — sopravvive ai riavvii del server. Calcolo distanze con formula di Haversine, segmentazione movimento/pausa, velocità media, durata movimento/pause. Query per **giorno/settimana/mese** risolte sul fuso `Europe/Rome` (settimana da lunedì, cambio ora legale gestito correttamente), oltre a un intervallo `custom` arbitrario. Esposto alla console operatore col comando `/stats`.
 - **Log CPU** (`cpu_log.rs`, ✅): task periodico (ogni 2 minuti) che scrive il consumo CPU del processo server su `cpu_usage.log`, tramite la crate `sysinfo`.
 - **Console operatore** (`admin_console` in `main.rs`, parsing e formattazione in `console.rs`, ✅): legge righe da stdin del *processo server*. È l'unica sorgente di `Broadcast`/`Direct`.
   - `/all <testo>` → a tutti i client connessi; `/to <utente> <testo>` → a un solo utente; `/stats <utente> <day|week|month|custom start end>` → report di movimento; `/users` → elenco dei connessi; `/help` → elenco dei comandi.
@@ -61,7 +61,7 @@ Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimba
 
 - Due comandi separati: `register` (manda solo `Register`, stampa l'esito, termina) e `login` (manda solo `Login`; se riesce, entra in sessione interattiva).
 - Indirizzo:porta del server configurabile come argomento opzionale (default `127.0.0.1:8080`).
-- In sessione interattiva: un task legge da stdin e manda `ChatToServer`; un task riceve e stampa `Broadcast`/`Direct`/`StateChanged`; un terzo manda `PositionUpdate` ogni 30 secondi. Scrittura sul socket centralizzata in un `writer_task`.
+- In sessione interattiva: un task legge da stdin e manda `ChatToServer`; un task riceve e stampa `Broadcast`/`Direct`; un terzo manda `PositionUpdate` ogni 30 secondi. Scrittura sul socket centralizzata in un `writer_task`.
 - **Riconnessione automatica**: se la connessione cade, il client ritenta con backoff esponenziale fino a un numero massimo di tentativi, invece di terminare subito.
 - Simulazione posizione: generatore pseudo-casuale (xorshift64 scritto a mano, niente dipendenza `rand`).
 
@@ -69,18 +69,20 @@ Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimba
 
 - Login/registrazione end-to-end, con più client connessi insieme.
 - Broadcast e messaggio diretto dalla console dell'operatore, ricevuti dai client giusti.
-- Transizioni di stato osservate da un secondo client in ascolto, incluso "prima posizione mai mandata".
+- Transizioni di stato osservate dalla console dell'operatore (`[bob] stato -> Moving`, `/users`), incluso "prima posizione mai mandata".
 - Coordinate fuori range scartate lato server, senza toccare lo stato.
 - `register`/`login` separati, indirizzo del server personalizzato.
+- Storico che sopravvive al riavvio del server (`/stats` continua a riportare i dati raccolti prima).
 
 ## Come si esegue
 
 ```bash
 # terminale 1: server
-# argomenti opzionali: <indirizzo:porta> (default 0.0.0.0:8080) e <file utenti> (default users.json)
+# argomenti opzionali: <indirizzo:porta> (default 0.0.0.0:8080), <file utenti>
+# (default users.json), <file storico> (default tracking_history.json)
 cargo run -p server
 cargo run -p server -- 127.0.0.1:9090
-cargo run -p server -- 127.0.0.1:9090 /tmp/prova-utenti.json
+cargo run -p server -- 127.0.0.1:9090 /tmp/prova-utenti.json /tmp/prova-storico.json
 
 # terminale 2: registra un utente (una tantum)
 cargo run -p client -- register alice password-alice
@@ -94,24 +96,29 @@ Vincoli sulle credenziali (vedi `users.rs`): username non vuoto, massimo 64 cara
 caratteri `[A-Za-z0-9_-]`; password fra 4 e 64 caratteri. Una password di 3 caratteri viene
 rifiutata con `RegisterErr`.
 
+Il server crea nella working directory `users.json` (credenziali), `tracking_history.json`
+(storico posizioni) e `cpu_usage.log` (log CPU); tutti ignorati da git.
+
 **La prima posizione arriva dopo 30 secondi, non subito**: il task che le invia attende un
 intervallo prima del primo campione. Fino ad allora il server non ha nulla da cui dedurre uno
-stato, quindi non compare nessun `StateChanged` e `/stats` riporta zero campioni.
+stato (l'utente resta `Disconnected`) e `/stats` riporta zero campioni.
 
 In chat: testo libero → mandato al server (`ChatToServer`); `/quit` → esce. Sul terminale del server: `/all <testo>` → a tutti; `/to <utente> <testo>` → a un utente; `/stats`, `/users`, `/help` (vedi sopra).
 
 ### Dimensione degli eseguibili
 
-Misurati con `cargo build --workspace --release` su Linux x86-64, senza `strip`:
+Build `cargo build --workspace --release`, senza `strip`. Dettaglio e interpretazione: `MANUALE_PROGETTISTA.md` § 4.2.
 
-| Eseguibile | Dimensione |
-|---|---|
-| `server` | **2,11 MB** |
-| `client` | **1,30 MB** |
+| Eseguibile | Linux x86-64 | Windows 11 x86-64 |
+|---|---|---|
+| `server` | **2 258 536 B** (2.15 MiB) | **1 493 504 B** (1.42 MiB) |
+| `client` | **1 357 592 B** (1.29 MiB) | **884 736 B** (0.84 MiB) |
 
 Il server includeva l'intero database dei fusi orari IANA tirato dentro da `chrono-tz`:
-filtrandolo sul solo `Europe/Rome` è passato da 3,87 a 2,11 MB. Il filtro è in
-`.cargo/config.toml` e vale per ogni build, CI compresa.
+filtrandolo sul solo `Europe/Rome` il server su Linux è sceso da 3,87 MB a ~2,1 MB
+(l'attuale 2 258 536 B include anche lo storico persistente, aggiunto dopo). Il filtro è in
+`.cargo/config.toml` e vale per ogni build, CI compresa. La differenza Linux/Windows dipende
+da toolchain e linker (GNU vs MSVC).
 
 ### Output del server
 
@@ -157,7 +164,10 @@ sta in una ventina di secondi. Ogni override attivo viene **annunciato all'avvio
 una demo con tempi accorciati non deve poter passare inosservata. Valori non numerici o zero
 vengono rifiutati con un messaggio e si torna al default.
 
-**Per la demo e per le misure del report: nessuna variabile impostata.**
+**Per le misure di dimensione del report:** build `--release`, nessuna variabile. La demo
+usa i tempi accorciati (vedi `DEMO.md`); la misura di CPU è stata presa con
+`GEORUGGINE_POSITION_INTERVAL=5` sui client per osservare un carico superiore a quello
+nominale (`MANUALE_PROGETTISTA.md` § 4.1).
 
 Test automatici (unitari + end-to-end):
 ```bash
@@ -172,7 +182,9 @@ cargo fmt --check
 
 ## Continuous Integration
 
-Ogni push o PR verso `dev`/`main` passa da un workflow GitHub Actions (`.github/workflows/ci.yaml`) che verifica, in ordine: formattazione, analisi statica senza warning, test automatici (unitari + end-to-end), build in release. Una PR non è mergiabile finché questi controlli non sono verdi.
+Il workflow GitHub Actions `.github/workflows/ci.yaml` verifica, in ordine: formattazione, analisi statica senza warning, test automatici (unitari + end-to-end), build in release. Sono gli stessi comandi elencati sopra: vanno eseguiti in locale prima di ogni PR.
+
+> **Nota:** sulle ultime PR il workflow non viene eseguito da GitHub Actions per un problema di billing dell'account. I quattro controlli sono stati eseguiti in locale, su Windows 11 e Linux x86-64, e passano (vedi `MANUALE_PROGETTISTA.md` § 5).
 
 ## Decisioni già prese
 
@@ -188,13 +200,15 @@ Ogni push o PR verso `dev`/`main` passa da un workflow GitHub Actions (`.github/
 | Lettura CPU del processo | Crate `sysinfo` | Multipiattaforma senza codice ad hoc per Windows/Linux |
 | Fusi orari incorporati nell'eseguibile | Solo `Europe/Rome`, via `filter-by-regex` di `chrono-tz` | Il database IANA completo (circa 600 fusi) pesa 1,76 MB su un binario di 3,87: il progetto ne usa uno solo. Il filtro sta in `.cargo/config.toml`, non in una variabile da esportare a mano, così chiunque compili ottiene lo stesso eseguibile |
 
-## Cosa manca / cosa cambierà (roadmap)
+## Stato del progetto
 
-Vedi `ORGANIZZAZIONE.md` per il piano completo.
+Piano completo e responsabilità: `ORGANIZZAZIONE.md`. Manuale del progettista (architettura,
+misure, tabella dei risultati): `MANUALE_PROGETTISTA.md`. Manuale utente:
+`MANUALE_UTENTE.md`. Scenario di dimostrazione: `DEMO.md`.
 
-- **Storico posizioni e analisi movimento** (Viorel): ✅ fatto — `tracking/`, esposto da `/stats`.
-- **Requisiti non funzionali** (Alice): log CPU ✅ fatto; **dimensione degli eseguibili non ancora misurata**; build/esecuzione su una seconda piattaforma verificata di fatto (Windows in locale, Linux via CI) ma non ancora scritta come prova formale; tabella dei risultati, scenario demo e report finale ancora da fare.
-- **Lato server** (Francesco): ✅ tutto completato. Registro sessioni e login simultanei (`session.rs`), persistenza atomica dello storage utenti (`users.rs`), console operatore completa con `/all`, `/to`, `/stats`, `/users`, `/help` (`console.rs`), timeout di inattività sulle connessioni.
+- **Storico posizioni e analisi movimento** (Viorel): ✅ `tracking/`, persistito su file, esposto da `/stats`.
+- **Requisiti non funzionali** (Alice): ✅ log CPU; ✅ dimensioni degli eseguibili misurate su Windows e Linux (vedi sopra e `MANUALE_PROGETTISTA.md` § 4.2); ✅ build/test/esecuzione su Windows 11 e Linux x86-64; ✅ manuali e scenario demo (`MANUALE_PROGETTISTA.md`, `MANUALE_UTENTE.md`, `DEMO.md`).
+- **Lato server** (Francesco): ✅ registro sessioni e login simultanei (`session.rs`), persistenza atomica di utenti (`users.rs`) e storico (`tracking/`), console operatore completa (`/all`, `/to`, `/stats`, `/users`, `/help`), timeout di inattività, rimozione di `StateChanged` dal protocollo.
 
 **Decisioni già prese come gruppo:**
 - **Gli utenti non vedono lo stato degli altri utenti.** La consegna chiede che sia *il sistema* a gestire lo stato di ogni utente e descrive la comunicazione solo come server→utente e utente→server: che un utente scopra quando un altro si muove, si ferma o si disconnette non è richiesto da nessuna parte. Era anche incoerente con la scelta, già presa, di non inoltrare i messaggi di chat fra utenti. Il messaggio `StateChanged` è stato rimosso dal protocollo; lo stato resta visibile a chi deve vederlo, cioè l'operatore alla console.
