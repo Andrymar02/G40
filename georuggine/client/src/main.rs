@@ -218,12 +218,6 @@ async fn run_session(server_addr: &str, username: &str, password: &str) -> Sessi
             match read_message::<_, ServerMessage>(&mut read_half).await {
                 Ok(ServerMessage::Broadcast { from, text }) => println!("[{from}] {text}"),
                 Ok(ServerMessage::Direct { from, text }) => println!("[{from} -> te] {text}"),
-                Ok(ServerMessage::StateChanged {
-                    username,
-                    new_state,
-                }) => {
-                    println!("({username} è ora {new_state:?})");
-                }
                 // LoginOk/LoginErr/RegisterOk/RegisterErr non dovrebbero più
                 // arrivare qui (login già concluso sopra): li stampo comunque
                 // invece di ignorarli silenziosamente, così un comportamento

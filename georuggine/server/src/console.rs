@@ -24,9 +24,6 @@ Comandi della console operatore:
   /users                        elenco degli utenti connessi
   /help                         mostra questo elenco";
 
-/// Uso del comando di popolamento dello storico (solo in modalità demo).
-pub const SEED_USAGE: &str = "Uso: /seed <utente> <giorni>  (storico finto, solo per la demo)";
-
 /// Quanti punti del tragitto stampare per esteso prima di riassumere.
 /// Con un campione ogni 30 secondi una giornata intera ne produce migliaia:
 /// riversarli tutti sul terminale renderebbe illeggibile il resto del report.
@@ -49,8 +46,6 @@ pub enum ConsoleCommand<'a> {
     Users,
     /// `/help`
     Help,
-    /// `/seed <utente> <giorni>`: solo in modalità demo.
-    Seed { username: &'a str, days: i64 },
     /// Riga riconosciuta ma usata male: si stampa questo messaggio.
     Usage(&'static str),
 }
@@ -91,19 +86,6 @@ pub fn parse_console_line(line: &str) -> Option<ConsoleCommand<'_>> {
         "/users" => ConsoleCommand::Usage("Uso: /users (senza argomenti)"),
 
         "/help" => ConsoleCommand::Help,
-
-        // Esiste solo in modalità demo: fuori da lì la riga cade nel ramo
-        // "comando non riconosciuto" come qualsiasi altro refuso, così il
-        // comando non compare nemmeno per sbaglio in esecuzione normale.
-        "/seed" if crate::demo::enabled() => match rest.split_once(char::is_whitespace) {
-            Some((username, days)) => match days.trim().parse::<i64>() {
-                Ok(days) if days > 0 && !username.is_empty() => {
-                    ConsoleCommand::Seed { username, days }
-                }
-                _ => ConsoleCommand::Usage(SEED_USAGE),
-            },
-            None => ConsoleCommand::Usage(SEED_USAGE),
-        },
 
         // Qualunque altra cosa: né un comando noto né un invio implicito.
         _ => ConsoleCommand::Usage(

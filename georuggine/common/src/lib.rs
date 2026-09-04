@@ -52,14 +52,13 @@ pub enum ServerMessage {
     /// del server (es. un operatore alla console del server), non su
     /// richiesta di un altro utente.
     Direct { from: String, text: String },
-    /// Notifica che lo stato di un utente è cambiato (es. per aggiornare la UI degli altri client).
-    StateChanged {
-        username: String,
-        new_state: UserState,
-    },
 }
 
-/// Stato di un utente lato server, replicato ai client interessati.
+/// Stato di un utente lato server.
+///
+/// Vive solo lato server: non viene trasmesso ai client. La consegna chiede
+/// che sia il sistema a gestire lo stato di ogni utente, non che gli utenti
+/// si vedano fra loro; lo stato e' visibile all'operatore dalla console.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum UserState {
     Disconnected,
@@ -194,21 +193,18 @@ mod tests {
     async fn server_message_roundtrip() {
         let (mut tx, mut rx) = tokio::io::duplex(1024);
 
-        let msg = ServerMessage::StateChanged {
-            username: "alice".to_string(),
-            new_state: UserState::Moving,
+        let msg = ServerMessage::Direct {
+            from: "server".to_string(),
+            text: "rientra in sede".to_string(),
         };
 
         framing::send_message(&mut tx, &msg).await.unwrap();
         let decoded: ServerMessage = framing::read_message(&mut rx).await.unwrap();
 
         match decoded {
-            ServerMessage::StateChanged {
-                username,
-                new_state,
-            } => {
-                assert_eq!(username, "alice");
-                assert_eq!(new_state, UserState::Moving);
+            ServerMessage::Direct { from, text } => {
+                assert_eq!(from, "server");
+                assert_eq!(text, "rientra in sede");
             }
             _ => panic!("variante inattesa"),
         }

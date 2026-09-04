@@ -45,17 +45,49 @@ fn cleanup_users_file(path: &str) {
     let _ = std::fs::remove_file(format!("{path}.tmp"));
 }
 
-/// Avvia il server vero su `addr` con il file utenti `users_file`, aspetta
-/// che accetti connessioni (max 15s) e ritorna sia il processo (da tenere
-/// vivo con `ServerGuard`) sia la connessione di prova, riusabile come primo
-/// client del test.
+/// Percorso di un file di storico posizioni temporaneo e univoco, stesso
+/// schema di `temp_users_file`.
+///
+/// PROBLEMA CHE PREVIENE: la stessa classe di bug gia' corretta per
+/// `users.json`. Il server accetta ora anche un file di storico posizioni
+/// (persistenza aggiunta su richiesta del professore, vedi
+/// `server/src/tracking/repository.rs`); senza un percorso dedicato per
+/// test, ogni processo server lanciato in parallelo ricadrebbe sullo stesso
+/// `tracking_history.json` di default nella working directory di `cargo
+/// test`. Ogni server ha un proprio contatore di `SessionId` che riparte da
+/// 1, ma tutti scriverebbero e rileggerebbero lo stesso file condiviso: la
+/// prima apertura di sessione di un test trova gia' una sessione con lo
+/// stesso id lasciata attiva da un altro test in corso, `open_session`
+/// fallisce con `SessionAlreadyExists`/`SessionAlreadyActive` e il login
+/// dell'utente fallisce con "errore interno durante il login" — verificato
+/// riproducendo esattamente questo fallimento prima di questa correzione.
+fn temp_tracking_file(name: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir()
+        .join(format!("georuggine_e2e_tracking_{name}_{unique}.json"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn cleanup_tracking_file(path: &str) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{path}.tmp"));
+}
+
+/// Avvia il server vero su `addr` con il file utenti `users_file` e lo
+/// storico posizioni `tracking_file`, aspetta che accetti connessioni (max
+/// 15s) e ritorna sia il processo (da tenere vivo con `ServerGuard`) sia la
+/// connessione di prova, riusabile come primo client del test.
 ///
 /// Prima questo stesso blocco di ~15 righe era copiato in ognuno dei 5 test:
 /// estratto qui per non doverlo aggiornare in 5 posti diversi ad ogni
 /// modifica (es. timeout, backoff).
-async fn spawn_server(addr: &str, users_file: &str) -> (Child, TcpStream) {
+async fn spawn_server(addr: &str, users_file: &str, tracking_file: &str) -> (Child, TcpStream) {
     let server_process = Command::new("cargo")
-        .args(["run", "-p", "server", "--", addr, users_file])
+        .args(["run", "-p", "server", "--", addr, users_file, tracking_file])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .expect("Impossibile avviare il server");
@@ -81,7 +113,8 @@ async fn spawn_server(addr: &str, users_file: &str) -> (Child, TcpStream) {
 async fn e2e_doppio_login_rifiutato() {
     let addr = "127.0.0.1:8091";
     let users_file = temp_users_file("doppio_login");
-    let (server_process, mut client1) = spawn_server(addr, &users_file).await;
+    let tracking_file = temp_tracking_file("doppio_login");
+    let (server_process, mut client1) = spawn_server(addr, &users_file, &tracking_file).await;
     let _guard = ServerGuard(server_process);
 
     // Registra utente (ignoriamo l'esito, se c'è già va bene uguale)
@@ -138,13 +171,15 @@ async fn e2e_doppio_login_rifiutato() {
     }
 
     cleanup_users_file(&users_file);
+    cleanup_tracking_file(&tracking_file);
 }
 
 #[tokio::test]
-async fn e2e_disconnessione_notificata_agli_altri() {
+async fn e2e_disconnessione_non_notificata_agli_altri() {
     let addr = "127.0.0.1:8092";
     let users_file = temp_users_file("disconnessione");
-    let (server_process, mut client_a) = spawn_server(addr, &users_file).await;
+    let tracking_file = temp_tracking_file("disconnessione");
+    let (server_process, mut client_a) = spawn_server(addr, &users_file, &tracking_file).await;
     let _guard = ServerGuard(server_process);
 
     // Client A (Alice) si registra e fa login
@@ -222,36 +257,27 @@ async fn e2e_disconnessione_notificata_agli_altri() {
     // Alice perde la connessione
     drop(client_a);
 
-    // VERIFICA: Bob deve ricevere un ServerMessage::StateChanged
-    // Usiamo un timeout di 3 secondi per evitare che il test si blocchi all'infinito se fallisce
-    let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let msg = read_message::<_, ServerMessage>(&mut client_b)
-                .await
-                .unwrap();
-
-            // Controlliamo se è il messaggio che aspettiamo
-            if let ServerMessage::StateChanged {
-                username,
-                new_state,
-            } = msg
-            {
-                // new_state è un enum (Disconnected, Idle, Moving). Lo convertiamo in stringa per comodità
-                if username == "alice" && format!("{:?}", new_state).contains("Disconnected") {
-                    return true; // Trovato. Esce dal loop e dal timeout
-                }
-            }
-        }
-    })
+    // VERIFICA: bob NON deve ricevere nulla. Il test controllava l'opposto,
+    // quando il server mandava uno `StateChanged` in broadcast agli altri
+    // client; quella notifica è stata rimossa perché la consegna chiede che
+    // sia il sistema a gestire lo stato di ogni utente e descrive la
+    // comunicazione solo come server->utente e utente->server. Che un utente
+    // sappia quando un altro si disconnette non è richiesto, ed era anche
+    // incoerente con la scelta di non inoltrare la chat fra utenti.
+    let ricevuto = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut client_b),
+    )
     .await;
 
-    // Se il timeout scade, timeout_result sarà un Err
     assert!(
-        timeout_result.is_ok(),
-        "Bob non ha mai ricevuto la notifica di disconnessione di Alice!"
+        ricevuto.is_err(),
+        "bob non deve sapere che alice si è disconnessa, ha ricevuto: {:?}",
+        ricevuto.unwrap()
     );
 
     cleanup_users_file(&users_file);
+    cleanup_tracking_file(&tracking_file);
 }
 
 #[tokio::test]
@@ -260,7 +286,8 @@ async fn e2e_chat_utente_inesistente_non_crasha() {
 
     let addr = "127.0.0.1:8093";
     let users_file = temp_users_file("chat_inesistente");
-    let (mut server_process, _client) = spawn_server(addr, &users_file).await;
+    let tracking_file = temp_tracking_file("chat_inesistente");
+    let (mut server_process, _client) = spawn_server(addr, &users_file, &tracking_file).await;
 
     let mut server_stdin = server_process.stdin.take().unwrap();
     let mut guard = ServerGuard(server_process);
@@ -285,13 +312,15 @@ async fn e2e_chat_utente_inesistente_non_crasha() {
     );
 
     cleanup_users_file(&users_file);
+    cleanup_tracking_file(&tracking_file);
 }
 
 #[tokio::test]
-async fn e2e_aggiornamento_posizione_notifica_stato() {
+async fn e2e_posizione_non_notificata_agli_altri() {
     let addr = "127.0.0.1:8094";
     let users_file = temp_users_file("posizione_stato");
-    let (server_process, mut client_a) = spawn_server(addr, &users_file).await;
+    let tracking_file = temp_tracking_file("posizione_stato");
+    let (server_process, mut client_a) = spawn_server(addr, &users_file, &tracking_file).await;
     let _guard = ServerGuard(server_process);
 
     // Client A (alice) si registra e fa login
@@ -366,33 +395,24 @@ async fn e2e_aggiornamento_posizione_notifica_stato() {
     .await
     .unwrap();
 
-    // VERIFICA: bob deve ricevere lo StateChanged di alice -> Idle (prima
-    // posizione mai ricevuta = notificata, vedi state::tests in state.rs).
-    let timeout_result = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let msg = read_message::<_, ServerMessage>(&mut client_b)
-                .await
-                .unwrap();
-
-            if let ServerMessage::StateChanged {
-                username,
-                new_state,
-            } = msg
-                && username == "alice"
-                && format!("{:?}", new_state).contains("Idle")
-            {
-                return true;
-            }
-        }
-    })
+    // VERIFICA: bob NON deve ricevere nulla. Lo stato di alice viene
+    // calcolato e conservato dal server — resta visibile all'operatore dalla
+    // console e da `/users`/`/stats` — ma non viene trasmesso agli altri
+    // utenti: vedi la nota in `server/src/state.rs`.
+    let ricevuto = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_message::<_, ServerMessage>(&mut client_b),
+    )
     .await;
 
     assert!(
-        timeout_result.is_ok(),
-        "Bob non ha mai ricevuto la notifica del cambio di stato di Alice!"
+        ricevuto.is_err(),
+        "bob non deve sapere che alice si è mossa, ha ricevuto: {:?}",
+        ricevuto.unwrap()
     );
 
     cleanup_users_file(&users_file);
+    cleanup_tracking_file(&tracking_file);
 }
 
 #[tokio::test]
@@ -403,7 +423,8 @@ async fn e2e_messaggio_diretto_valido_arriva_al_destinatario() {
     // test della chat verso un utente inesistente.
     let addr = "127.0.0.1:8095";
     let users_file = temp_users_file("messaggio_diretto");
-    let (mut server_process, mut client) = spawn_server(addr, &users_file).await;
+    let tracking_file = temp_tracking_file("messaggio_diretto");
+    let (mut server_process, mut client) = spawn_server(addr, &users_file, &tracking_file).await;
 
     let mut server_stdin = server_process.stdin.take().unwrap();
     let _guard = ServerGuard(server_process);
@@ -456,14 +477,16 @@ async fn e2e_messaggio_diretto_valido_arriva_al_destinatario() {
     );
 
     cleanup_users_file(&users_file);
+    cleanup_tracking_file(&tracking_file);
 }
 
 #[tokio::test]
 async fn e2e_reconnect_after_disconnect_opens_new_tracking_session() {
     let addr = "127.0.0.1:8096";
     let users_file = temp_users_file("tracking_reconnect");
+    let tracking_file = temp_tracking_file("tracking_reconnect");
 
-    let (server_process, mut first_client) = spawn_server(addr, &users_file).await;
+    let (server_process, mut first_client) = spawn_server(addr, &users_file, &tracking_file).await;
 
     let _guard = ServerGuard(server_process);
 
@@ -530,4 +553,5 @@ async fn e2e_reconnect_after_disconnect_opens_new_tracking_session() {
     );
 
     cleanup_users_file(&users_file);
+    cleanup_tracking_file(&tracking_file);
 }

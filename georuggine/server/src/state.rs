@@ -1,13 +1,23 @@
 //! Macchina a stati live di un utente (`Disconnected`/`Idle`/`Moving`) e lo
 //! storage in memoria dell'ultima posizione nota.
 //!
+//! Lo stato **non viene trasmesso agli altri client**. Una versione
+//! precedente mandava un `StateChanged` in broadcast a tutti i connessi, ma
+//! la consegna chiede che sia *il sistema* a gestire lo stato di ogni
+//! utente e descrive la comunicazione solo come server->utente e
+//! utente->server: che un utente scopra quando un altro si muove o si ferma
+//! non e' richiesto da nessuna parte. Era anche incoerente con la scelta,
+//! gia' presa e documentata, di non inoltrare i messaggi di chat fra
+//! utenti. Lo stato resta visibile a chi di dovere: la console
+//! dell'operatore, che lo stampa a ogni transizione e lo espone con
+//! `/users` e `/stats`.
+//!
 //! Modulo separato apposta da `main.rs` (vedi ORGANIZZAZIONE.md: "Andrea
 //! mantiene la proprietà di [...] macchina a stati live", mentre Francesco
 //! mantiene "ciclo principale del server" in `main.rs`): così le due persone
 //! possono lavorare in parallelo senza modificare lo stesso file.
 
-use crate::Clients;
-use common::{ServerMessage, UserState};
+use common::UserState;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -120,7 +130,6 @@ fn is_valid_lon(lon: f64) -> bool {
 ///   (sull'orologio del server) → `Idle`.
 /// - Altrimenti nessun cambiamento.
 pub async fn update_position(
-    clients: &Clients,
     positions: &Positions,
     clock: &SharedClock,
     username: &str,
@@ -174,8 +183,11 @@ pub async fn update_position(
     };
 
     if let Some(LiveState::Known(state)) = new_state {
+        // Nel dettaglio, come gli altri eventi automatici: la console deve
+        // restare ferma finche' l'operatore non chiede qualcosa. Lo stato
+        // corrente si legge su richiesta con `/users`, che lo mostra per
+        // ogni utente connesso (vedi `current_state`).
         crate::detail!("[{username}] stato -> {state:?}");
-        broadcast_state_change(clients, username, state).await;
     }
 
     true
@@ -187,7 +199,20 @@ pub async fn update_position(
 /// o mai loggato/mai presente in mappa), non c'è nessuno stato pubblico da
 /// revocare: nessun client ha mai saputo che fosse "online", quindi niente
 /// da notificare.
-pub async fn mark_disconnected(clients: &Clients, positions: &Positions, username: &str) {
+/// Stato corrente di `username`, se ne e' gia' stato osservato uno.
+///
+/// `None` significa due cose diverse che alla console interessano allo
+/// stesso modo: utente mai visto, oppure connesso ma senza ancora una
+/// posizione ricevuta (i primi 30 secondi dopo il login).
+pub async fn current_state(positions: &Positions, username: &str) -> Option<UserState> {
+    let guard = positions.lock().await;
+    match guard.get(username).map(|record| &record.state) {
+        Some(LiveState::Known(state)) => Some(state.clone()),
+        _ => None,
+    }
+}
+
+pub async fn mark_disconnected(positions: &Positions, username: &str) {
     let changed = {
         let mut guard = positions.lock().await;
         match guard.get_mut(username) {
@@ -202,26 +227,7 @@ pub async fn mark_disconnected(clients: &Clients, positions: &Positions, usernam
         }
     };
 
-    if changed {
-        broadcast_state_change(clients, username, UserState::Disconnected).await;
-    }
-}
-
-/// Notifica a tutti i client connessi (tranne l'utente il cui stato è
-/// cambiato) un `ServerMessage::StateChanged`.
-///
-/// La consegna passa dal registro delle sessioni (`session.rs`), che si
-/// occupa del lock e della rimozione dei canali ormai chiusi.
-async fn broadcast_state_change(clients: &Clients, username: &str, new_state: UserState) {
-    clients
-        .broadcast_except(
-            username,
-            ServerMessage::StateChanged {
-                username: username.to_string(),
-                new_state,
-            },
-        )
-        .await;
+    if changed {}
 }
 
 #[cfg(test)]
@@ -252,17 +258,12 @@ mod tests {
         }
     }
 
-    fn no_clients() -> Clients {
-        crate::SessionRegistry::new()
-    }
-
     #[tokio::test]
     async fn prima_posizione_diventa_idle_ed_e_notificata() {
-        let clients = no_clients();
         let positions = new_positions();
         let clock: SharedClock = FakeClock::new(1_000);
 
-        let changed = update_position(&clients, &positions, &clock, "alice", 45.0, 7.0).await;
+        let changed = update_position(&positions, &clock, "alice", 45.0, 7.0).await;
 
         assert!(changed);
         let guard = positions.lock().await;
@@ -272,12 +273,11 @@ mod tests {
 
     #[tokio::test]
     async fn cambio_coordinate_passa_a_moving() {
-        let clients = no_clients();
         let positions = new_positions();
         let clock: SharedClock = FakeClock::new(1_000);
 
-        update_position(&clients, &positions, &clock, "alice", 45.0, 7.0).await;
-        update_position(&clients, &positions, &clock, "alice", 45.001, 7.0).await;
+        update_position(&positions, &clock, "alice", 45.0, 7.0).await;
+        update_position(&positions, &clock, "alice", 45.001, 7.0).await;
 
         let guard = positions.lock().await;
         assert_eq!(
@@ -288,16 +288,15 @@ mod tests {
 
     #[tokio::test]
     async fn coordinate_ferme_tre_minuti_tornano_idle() {
-        let clients = no_clients();
         let positions = new_positions();
         let clock = FakeClock::new(1_000);
         let shared: SharedClock = clock.clone();
 
-        update_position(&clients, &positions, &shared, "alice", 45.0, 7.0).await;
-        update_position(&clients, &positions, &shared, "alice", 45.001, 7.0).await; // -> Moving
+        update_position(&positions, &shared, "alice", 45.0, 7.0).await;
+        update_position(&positions, &shared, "alice", 45.001, 7.0).await; // -> Moving
 
         clock.advance(IDLE_THRESHOLD_SECONDS - 1);
-        update_position(&clients, &positions, &shared, "alice", 45.001, 7.0).await;
+        update_position(&positions, &shared, "alice", 45.001, 7.0).await;
         {
             let guard = positions.lock().await;
             // Ancora meno di 3 minuti fermo: resta Moving.
@@ -308,7 +307,7 @@ mod tests {
         }
 
         clock.advance(1);
-        update_position(&clients, &positions, &shared, "alice", 45.001, 7.0).await;
+        update_position(&positions, &shared, "alice", 45.001, 7.0).await;
         let guard = positions.lock().await;
         assert_eq!(
             guard.get("alice").unwrap().state,
@@ -318,11 +317,10 @@ mod tests {
 
     #[tokio::test]
     async fn coordinate_non_valide_vengono_scartate() {
-        let clients = no_clients();
         let positions = new_positions();
         let clock: SharedClock = FakeClock::new(1_000);
 
-        let accepted = update_position(&clients, &positions, &clock, "alice", 200.0, 7.0).await;
+        let accepted = update_position(&positions, &clock, "alice", 200.0, 7.0).await;
 
         assert!(!accepted);
         assert!(positions.lock().await.get("alice").is_none());
@@ -330,23 +328,21 @@ mod tests {
 
     #[tokio::test]
     async fn disconnessione_senza_posizione_non_notifica() {
-        let clients = no_clients();
         let positions = new_positions();
 
         // Nessun update_position mai chiamato per "bob".
-        mark_disconnected(&clients, &positions, "bob").await;
+        mark_disconnected(&positions, "bob").await;
 
         assert!(positions.lock().await.get("bob").is_none());
     }
 
     #[tokio::test]
     async fn disconnessione_dopo_posizione_nota_passa_a_disconnected() {
-        let clients = no_clients();
         let positions = new_positions();
         let clock: SharedClock = FakeClock::new(1_000);
 
-        update_position(&clients, &positions, &clock, "alice", 45.0, 7.0).await;
-        mark_disconnected(&clients, &positions, "alice").await;
+        update_position(&positions, &clock, "alice", 45.0, 7.0).await;
+        mark_disconnected(&positions, "alice").await;
 
         let guard = positions.lock().await;
         assert_eq!(

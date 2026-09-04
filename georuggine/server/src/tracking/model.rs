@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 /// Distanza oltre la quale una posizione è considerata cambiata
 pub const MOVEMENT_THRESHOLD_METERS: f64 = 1.0;
 
@@ -8,7 +10,7 @@ pub enum GeoPointError {
     LongitudeOutOfRange,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct GeoPoint {
     lat: f64,
     lon: f64,
@@ -40,9 +42,35 @@ impl GeoPoint {
     }
 }
 
+/// `Deserialize` scritto a mano invece di derivato: un derive banale
+/// costruirebbe un `GeoPoint` direttamente dai campi `lat`/`lon` letti dal
+/// file, scavalcando `try_new` e la sua validazione. Un file di storico
+/// manomesso (o scritto da una versione futura con un bug) potrebbe cosi'
+/// reintrodurre nel programma coordinate fuori range o non finite — esattamente
+/// cio' che il costruttore esiste per impedire. Passando comunque da
+/// `try_new`, un punto non valido nel file fa fallire il caricamento invece
+/// di entrare silenziosamente nello storico.
+impl<'de> Deserialize<'de> for GeoPoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawGeoPoint {
+            lat: f64,
+            lon: f64,
+        }
+
+        let raw = RawGeoPoint::deserialize(deserializer)?;
+
+        GeoPoint::try_new(raw.lat, raw.lon)
+            .map_err(|error| serde::de::Error::custom(format!("{error:?}")))
+    }
+}
+
 pub type SessionId = u64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackingSession {
     id: SessionId,
     username: String,
@@ -85,7 +113,7 @@ impl TrackingSession {
 ///
 /// received_at è il timestamp del server usato per l'ordinamento.
 /// client_timestamp è opzionale e proviene dal client.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PositionSample {
     username: String,
     session_id: SessionId,

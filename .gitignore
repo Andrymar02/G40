@@ -17,6 +17,9 @@ target/
 # Storage utenti del server (credenziali registrate, dati locali di sviluppo)
 users.json
 
+# Storico posizioni del server (sessioni + campioni, dati locali di sviluppo)
+tracking_history.json
+
 # Editor / IDE
 .vscode/
 .idea/
@@ -30,6 +33,9 @@ ORGANIZZAZIONE-2.pdf
 
 # Temporaneo della scrittura atomica dello storage utenti (users.rs)
 users.json.tmp
+
+# Temporaneo della scrittura atomica dello storico posizioni (tracking/repository.rs)
+tracking_history.json.tmp
 
 # Temporaneo CPU usage
 cpu_usage.log

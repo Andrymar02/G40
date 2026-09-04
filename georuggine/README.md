@@ -44,7 +44,8 @@ Comunicazione: solo client→server (`ChatToServer`, ricevuto e basta, mai rimba
 - **Registro sessioni** (`session.rs`, ✅): ogni connessione riceve un `SessionId` univoco alla accept. Un secondo login con lo stesso username viene **rifiutato** (vince chi è entrato per primo); logout e pulizia dei canali chiusi rimuovono una voce solo se l'id combacia, così una connessione che termina in ritardo non può sfrattare la sessione che nel frattempo ha preso quell'username. Ogni client ha un `writer_task` dedicato che possiede la propria `OwnedWriteHalf`; i lock si tengono solo per lookup/clone del `Sender`, mai durante la scrittura in rete.
   - **Timeout di inattività (90 s)**: una connessione che non manda nulla per tre intervalli di posizione consecutivi viene chiusa e il suo username liberato. Serve per il client che sparisce a livello di rete (cavo staccato, wifi caduto, VM sospesa) o resta congelato: il processo non muore, il kernel non manda il FIN, e senza timeout la sessione resterebbe registrata a tempo indeterminato — `SO_KEEPALIVE` è spento di default e il primo sondaggio TCP arriverebbe comunque dopo due ore.
 - **Macchina a stati live** (`state.rs`, ✅): traccia per utente ultima posizione nota e stato (`Disconnected`/`Idle`/`Moving`).
-  - Transizioni: prima posizione mai ricevuta → `Idle`; coordinate cambiate → `Moving`; coordinate ferme da ≥3 minuti → `Idle`; disconnessione → `Disconnected`. Notifica `StateChanged` agli altri client solo quando lo stato cambia davvero.
+  - Transizioni: prima posizione mai ricevuta → `Idle`; coordinate cambiate → `Moving`; coordinate ferme da ≥3 minuti → `Idle`; disconnessione → `Disconnected`.
+  - **Lo stato non viene trasmesso agli altri utenti**: resta lato server e si vede dalla console dell'operatore, che stampa ogni transizione (`[bob] stato -> Moving`) e lo espone con `/users` e `/stats`. Una versione precedente lo mandava in broadcast a tutti i client connessi: rimosso, vedi le decisioni sotto.
   - **Orologio del server**, non timestamp del client: le transizioni usano un trait `Clock` (`SystemClock` in produzione, un orologio simulato nei test).
   - **Validazione coordinate**: `lat`/`lon` fuori range (o `NaN`/infinito) vengono scartate, loggate, e non toccano lo stato.
   - 6 test automatici (transizioni, validazione, disconnessione) — `cargo test -p server`, nessuno aspetta 3 minuti reali grazie all'orologio simulato.
@@ -98,6 +99,19 @@ intervallo prima del primo campione. Fino ad allora il server non ha nulla da cu
 stato, quindi non compare nessun `StateChanged` e `/stats` riporta zero campioni.
 
 In chat: testo libero → mandato al server (`ChatToServer`); `/quit` → esce. Sul terminale del server: `/all <testo>` → a tutti; `/to <utente> <testo>` → a un utente; `/stats`, `/users`, `/help` (vedi sopra).
+
+### Dimensione degli eseguibili
+
+Misurati con `cargo build --workspace --release` su Linux x86-64, senza `strip`:
+
+| Eseguibile | Dimensione |
+|---|---|
+| `server` | **2,11 MB** |
+| `client` | **1,30 MB** |
+
+Il server includeva l'intero database dei fusi orari IANA tirato dentro da `chrono-tz`:
+filtrandolo sul solo `Europe/Rome` è passato da 3,87 a 2,11 MB. Il filtro è in
+`.cargo/config.toml` e vale per ogni build, CI compresa.
 
 ### Output del server
 
@@ -172,6 +186,7 @@ Ogni push o PR verso `dev`/`main` passa da un workflow GitHub Actions (`.github/
 | Simulazione posizione | Generatore pseudo-casuale (xorshift a mano) | Nessuna dipendenza `rand` |
 | Fuso orario per giorno/settimana/mese | `Europe/Rome`, settimana da lunedì | Scelta esplicita richiesta da `ORGANIZZAZIONE.md`; gestisce anche il cambio ora legale |
 | Lettura CPU del processo | Crate `sysinfo` | Multipiattaforma senza codice ad hoc per Windows/Linux |
+| Fusi orari incorporati nell'eseguibile | Solo `Europe/Rome`, via `filter-by-regex` di `chrono-tz` | Il database IANA completo (circa 600 fusi) pesa 1,76 MB su un binario di 3,87: il progetto ne usa uno solo. Il filtro sta in `.cargo/config.toml`, non in una variabile da esportare a mano, così chiunque compili ottiene lo stesso eseguibile |
 
 ## Cosa manca / cosa cambierà (roadmap)
 
@@ -182,6 +197,7 @@ Vedi `ORGANIZZAZIONE.md` per il piano completo.
 - **Lato server** (Francesco): ✅ tutto completato. Registro sessioni e login simultanei (`session.rs`), persistenza atomica dello storage utenti (`users.rs`), console operatore completa con `/all`, `/to`, `/stats`, `/users`, `/help` (`console.rs`), timeout di inattività sulle connessioni.
 
 **Decisioni già prese come gruppo:**
+- **Gli utenti non vedono lo stato degli altri utenti.** La consegna chiede che sia *il sistema* a gestire lo stato di ogni utente e descrive la comunicazione solo come server→utente e utente→server: che un utente scopra quando un altro si muove, si ferma o si disconnette non è richiesto da nessuna parte. Era anche incoerente con la scelta, già presa, di non inoltrare i messaggi di chat fra utenti. Il messaggio `StateChanged` è stato rimosso dal protocollo; lo stato resta visibile a chi deve vederlo, cioè l'operatore alla console.
 - **Nessun hashing delle password**: restano in chiaro, in memoria e sul file utenti. La consegna non pone requisiti di sicurezza (chiede solo account e password in fase di registrazione) e chiede invece attenzione a dimensione dell'eseguibile e consumo di CPU, che una funzione di hashing peggiorerebbe. Di conseguenza tutto viaggia in chiaro sulla rete, password del messaggio `Login` incluse: niente TLS.
 
 **Decisioni ancora aperte, da discutere come gruppo:**
