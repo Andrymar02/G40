@@ -1,6 +1,5 @@
 mod console;
 mod cpu_log;
-mod demo;
 #[macro_use]
 mod logging;
 mod session;
@@ -119,9 +118,6 @@ async fn main() -> io::Result<()> {
         println!("{avviso}");
     }
     if let Some(avviso) = logging::startup_notice() {
-        println!("{avviso}");
-    }
-    if let Some(avviso) = demo::startup_notice() {
         println!("{avviso}");
     }
 
@@ -295,49 +291,6 @@ async fn admin_console(
             }
 
             ConsoleCommand::Help => println!("{}", console::CONSOLE_HELP),
-
-            ConsoleCommand::Seed { username, days } => {
-                let now_utc = clock.now_secs();
-                match demo::seed(&tracking, username, days, now_utc).await {
-                    Ok(riepilogo) if days > demo::MAX_DAYS => println!(
-                        "richiesti {days} giorni, limitati a {} (la retention dello storico non\n\
-                         ne conserva di piu'): {} campioni in {} sessioni,\n\
-                         dal {} al {}",
-                        demo::MAX_DAYS,
-                        riepilogo.samples,
-                        riepilogo.sessions,
-                        console::format_instant(riepilogo.first_utc),
-                        console::format_instant(riepilogo.last_utc),
-                    ),
-                    Ok(riepilogo) => println!(
-                        "storico NON reale generato per {username}: {} campioni in {} sessioni,\n\
-                         dal {} al {}\nProva ora: /stats {username} day | week | month",
-                        riepilogo.samples,
-                        riepilogo.sessions,
-                        console::format_instant(riepilogo.first_utc),
-                        console::format_instant(riepilogo.last_utc),
-                    ),
-                    Err(demo::SeedError::GiaPopolato) => println!(
-                        "storico di {username} già generato in questa esecuzione.\n\
-                         Rigenerarlo lo sommerebbe al precedente, raddoppiando i numeri:\n\
-                         riavvia il server per ripartire da uno storico vuoto,\n\
-                         oppure usa un altro utente."
-                    ),
-                    // L'utente connesso ha gia' una sessione aperta nel
-                    // tracking, e il repository ne ammette una sola per
-                    // utente: e' l'invariante giusta, ma l'errore grezzo
-                    // non dice cosa fare.
-                    Err(demo::SeedError::Tracking(
-                        server::tracking::TrackingError::SessionAlreadyActive,
-                    )) => println!(
-                        "{username} è connesso adesso: lo storico va generato PRIMA del suo login.\n\
-                         Fallo uscire (/quit sul suo client) e ripeti, oppure genera un altro utente."
-                    ),
-                    Err(demo::SeedError::Tracking(error)) => {
-                        println!("generazione fallita: {error:?}")
-                    }
-                }
-            }
 
             ConsoleCommand::Usage(message) => println!("{message}"),
         }
