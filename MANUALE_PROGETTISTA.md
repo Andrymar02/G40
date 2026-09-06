@@ -11,9 +11,8 @@ loro motivazioni, funzionamento interno dei singoli sottosistemi, requisiti non
 funzionali con le misure, qualità e test. Per l'uso dei due programmi si veda
 `MANUALE_UTENTE.md`; per una sequenza di prova, `DEMO.md`.
 
-- **Codice:** workspace Cargo in `georuggine/` (`common`, `server`, `client`).
-- **Organizzazione del gruppo:** `ORGANIZZAZIONE.md`.
-- **Istruzioni operative e variabili d'ambiente:** `georuggine/README.md`.
+- **Codice:** workpace Cargo in `georuggine/` (`common`, `server`, `client`).
+- **Istruzioni operative e variabili d'ambiente:** `MANUALE_UTENTE.md`.
 
 > Riferito allo stato del branch `dev` al commit `2cf344b` (merge `quality-assurance`).
 
@@ -38,7 +37,7 @@ protocollo si fa in un punto solo.
 `Broadcast`, `Direct`. Serializzazione JSON, framing *length-prefixed* (4 byte
 big-endian + payload) con cap a 1 MiB. Lo stato dell'utente
 (`Disconnected`/`Idle`/`Moving`) **non** fa parte del protocollo: vive solo lato
-server (§ 3.4, § 7).
+server.
 
 **Scelte architetturali principali**
 
@@ -52,14 +51,19 @@ server (§ 3.4, § 7).
 | Comunicazione broadcast/diretta | Decisa dal server tramite console operatore | La consegna descrive solo client→server e server→client. |
 | Simulazione della posizione | Generatore pseudo-casuale (xorshift64 scritto a mano) | Nessuna dipendenza `rand`, meno codice nell'eseguibile. |
 | Storico posizioni | Persistito su file (`tracking_history.json`), scrittura atomica (temp + `fsync` + `rename`), `load` all'avvio, retention 35 giorni | Le statistiche su settimana/mese richiedono dati che sopravvivono ai riavvii; stesso schema di scrittura di `users.json`. |
-| Fuso orario per giorno/settimana/mese | `Europe/Rome`, settimana da lunedì | Scelta esplicita richiesta da `ORGANIZZAZIONE.md`; gestisce il cambio di ora legale. |
+| Fuso orario per giorno/settimana/mese | `Europe/Rome`, settimana da lunedì | Scelta esplicita richiesta dall'organizzazione del gruppo; gestisce il cambio di ora legale. |
 | Fusi orari incorporati nel binario | Solo `Europe/Rome`, via `filter-by-regex` di `chrono-tz` (`.cargo/config.toml`) | Il database IANA completo (~600 fusi con regole storiche) pesa ~1,7 MB. Il filtro è nel file di config, non in una variabile da esportare a mano: ogni build produce lo stesso eseguibile. |
 | Lettura del consumo di CPU | Crate `sysinfo` | Multipiattaforma, senza codice ad hoc per Windows/Linux. |
-| Password | In chiaro, nessun hashing | La consegna non pone requisiti di sicurezza e chiede attenzione a dimensione dell'eseguibile e consumo di CPU. Decisione di gruppo. |
+| Password | In chiaro, nessun hashing | La consegna non pone requisiti di sicurezza e chiede attenzione a dimensione dell'eseguibile e consumo di CPU.
 
 ---
 
 ## 2. Come è realizzato
+
+
+![](docs/img/grafico-georuggine.png)
+
+
 
 ### 2.1 `common` — protocollo e framing
 
@@ -74,7 +78,7 @@ con `serde`. Il modulo `framing` fa da unico punto di contatto con il socket:
 
 TCP è un flusso senza confini di messaggio: il prefisso di lunghezza è ciò che
 permette a chi legge di sapere dove finisce un messaggio e comincia il successivo.
-Isolare qui la (de)serializzazione rende sostituibile JSON con un formato binario
+Isolare qui la serializazione rende sostituibile JSON con un formato binario
 senza toccare client o server.
 
 Il modulo `timing` centralizza i tre tempi del protocollo (intervallo di posizione
@@ -84,6 +88,8 @@ sono quelli della consegna; ciascuno è sovrascrivibile da una variabile d'ambie
 all'avvio. I test non ne dipendono: usano l'orologio simulato.
 
 ### 2.2 Ciclo di vita di una connessione (server)
+
+![](docs/img/diagramma-doppio-login.png)
 
 `main` carica `UserStore` e lo storico (un file corrotto **ferma l'avvio**, non
 riparte da vuoto), poi fa il `bind` e per ogni connessione accettata lancia un
@@ -107,7 +113,7 @@ Dentro `handle_client`:
      indeterminato: `SO_KEEPALIVE` è spento e il primo sondaggio TCP arriverebbe
      dopo due ore.
 4. all'uscita dal loop, la pulizia rimuove la sessione dal registro e libera
-   l'username **solo se l'id combacia** (§ 2.3), chiude la sessione di tracking e
+   l'username **solo se l'id combacia**, chiude la sessione di tracking e
    aggiorna lo stato a `Disconnected`.
 
 `Login` verifica le credenziali con `UserStore`, poi prova a registrare la sessione
@@ -132,6 +138,8 @@ Mappa `username → (SessionId, Sender<ServerMessage>)` dietro un lock. Punti ch
   cui `writer_task` è già terminato.
 
 ### 2.4 Macchina a stati e orologio iniettabile (`state.rs`)
+
+![](docs/img/macchina-a-stati-utente.png)
 
 Struttura in memoria `username → (ultima posizione nota, stato, istante
 dell'ultimo cambiamento)`. Transizioni:
@@ -159,7 +167,7 @@ sequenze artificiali.
   (utente, `SessionId`, punto, istante di ricezione lato server, timestamp del
   client a titolo informativo).
 - **`repository`** (`FilePositionRepository`): tiene sessioni e campioni in memoria
-  e li persiste su file (§ 2.7). Registra i campioni solo per una sessione aperta e
+  e li persiste su file. Registra i campioni solo per una sessione aperta e
   con username coerente; pota i campioni oltre la retention (35 giorni) a ogni
   inserimento. Per non riscrivere il file a ogni campione, la persistenza dopo un
   inserimento è **limitata a una ogni 30 s per utente** (apertura e chiusura
@@ -206,7 +214,7 @@ un file a metà:
 2. `fsync` sul temporaneo;
 3. `rename` atomico sul nome finale.
 
-Un `rename` nello stesso filesystem è atomico: un lettore vede il file **vecchio
+Un `rename` nelllo stesso filesystem è atomico: un lettore vede il file **vecchio
 per intero** o quello **nuovo per intero**, mai una via di mezzo, e un crash a metà
 scrittura lascia al più un `.tmp` da ignorare. In lettura, un file presente ma
 illeggibile **ferma l'avvio**: ripartire da vuoto, alla prima scrittura,
@@ -215,7 +223,7 @@ cancellerebbe i dati esistenti.
 Sullo storico, se la scrittura su disco fallisce ma la mutazione in memoria è
 andata a buon fine, l'errore (`TrackingError::PersistenceFailed`) viene
 **segnalato a chi chiama**, non annullato: il dato resta valido per la sessione
-corrente (§ 7).
+corrente.
 
 ### 2.8 Logging del consumo di CPU (`cpu_log.rs`)
 
@@ -253,24 +261,24 @@ tentativi.
 
 ## 3. Requisiti funzionali — stato di copertura
 
-| Requisito della consegna | Stato | Dove |
-|---|---|---|
-| Registrazione e autenticazione di più utenti | ✅ | `server/src/users.rs` — `UserStore` persistito su JSON, scrittura atomica, file corrotto che ferma l'avvio. |
-| Invio periodico della posizione ogni 30 s | ✅ | `client` — task dedicato; primo campione dopo un intervallo. Default 30 s (`common/src/timing.rs`). |
-| Il sistema gestisce lo stato di ogni utente: `sconnesso` / `fermo` / `in movimento` | ✅ | `server/src/state.rs` — `Disconnected` / `Idle` / `Moving`, mantenuti dal server; l'operatore li vede da console, `/users`, `/stats`. |
-| Transizione fermo → in movimento al cambio di coordinate | ✅ | `state.rs` — registrata lato server, non trasmessa ai client. |
-| Transizione in movimento → fermo dopo ≥ 3 min di coordinate invariate | ✅ | `state.rs`, soglia 180 s sull'orologio del server. |
-| Simulazione del movimento | ✅ | `client/src/simulator.rs`. |
-| Analisi del movimento: tragitto, velocità media, durata del movimento, durata delle pause | ✅ | `server/src/tracking/analytics.rs` — Haversine, segmentazione movimento/pausa, velocità media escludendo le pause. |
-| Intervalli programmabili: giorno / settimana / mese corrente | ✅ | `server/src/tracking/period.rs` — fuso `Europe/Rome`, più intervallo `custom`. |
-| Messaggi del server in broadcast e diretti | ✅ | Console operatore (`/all`, `/to`). |
-| Messaggi di testo dall'utente al server | ✅ | `ClientMessage::ChatToServer`, non ritrasmesso ad altri utenti. |
-| Validazione delle coordinate | ✅ | `state.rs` / `tracking::model` — coordinate fuori range o non finite scartate. |
-| Gestione della disconnessione prima della prima posizione | ✅ | `state.rs` — nessuna transizione spuria. |
-| Rifiuto del secondo login con lo stesso username | ✅ | `server/src/session.rs` — vince chi è entrato per primo. |
-| File di log del consumo di CPU ogni 2 minuti | ✅ | `server/src/cpu_log.rs` — `cpu_usage.log` (§ 4.1). |
-| Report con la dimensione dell'eseguibile prodotto | ✅ | § 4.2. |
-| Eseguibile su almeno due piattaforme | ✅ | Windows 11 e Linux x86-64 (§ 4.3). |
+| Requisito della consegna | Dove |
+|---|---|
+| Registrazione e autenticazione di più utenti | `server/src/users.rs` — `UserStore` persistito su JSON, scrittura atomica, file corrotto che ferma l'avvio. |
+| Invio periodico della posizione ogni 30 s | `client` — task dedicato; primo campione dopo un intervallo. Default 30 s (`common/src/timing.rs`). |
+| Il sistema gestisce lo stato di ogni utente: `sconnesso` / `fermo` / `in movimento` | `server/src/state.rs` — `Disconnected` / `Idle` / `Moving`, mantenuti dal server; l'operatore li vede da console, `/users`, `/stats`. |
+| Transizione fermo → in movimento al cambio di coordinate | `state.rs` — registrata lato server, non trasmessa ai client. |
+| Transizione in movimento → fermo dopo ≥ 3 min di coordinate invariate | `state.rs`, soglia 180 s sull'orologio del server. |
+| Simulazione del movimento | `client/src/simulator.rs`. |
+| Analisi del movimento: tragitto, velocità media, durata del movimento, durata delle pause | `server/src/tracking/analytics.rs` — Haversine, segmentazione movimento/pausa, velocità media escludendo le pause. |
+| Intervalli programmabili: giorno / settimana / mese corrente | `server/src/tracking/period.rs` — fuso `Europe/Rome`, più intervallo `custom`. |
+| Messaggi del server in broadcast e diretti | Console operatore (`/all`, `/to`). |
+| Messaggi di testo dall'utente al server | `ClientMessage::ChatToServer`, non ritrasmesso ad altri utenti. |
+| Validazione delle coordinate | `state.rs` / `tracking::model` — coordinate fuori range o non finite scartate. |
+| Gestione della disconnessione prima della prima posizione | `state.rs` — nessuna transizione spuria. |
+| Rifiuto del secondo login con lo stesso username | `server/src/session.rs` — vince chi è entrato per primo. |
+| File di log del consumo di CPU ogni 2 minuti | `server/src/cpu_log.rs` — `cpu_usage.log`. |
+| Report con la dimensione dell'eseguibile prodotto | Sezione dedicata di questo documento. |
+| Eseguibile su almeno due piattaforme | Windows 11 e Linux x86-64. |
 
 Oltre al minimo richiesto: riconnessione automatica del client con backoff;
 timeout di inattività lato server (90 s); storico persistito su file che
@@ -304,7 +312,36 @@ per messaggio (serializzazione JSON, Haversine sullo storico, riscrittura di
 `tracking_history.json` al più ogni 30 s per utente) è lineare nel numero di
 campioni e trascurabile alle frequenze della consegna.
 
-### 4.2 Dimensione degli eseguibili
+### 4.2 Comportamento sotto carico (molte connessioni simultanee)
+
+Per verificare il comportamento del server con molti utenti, oltre alle misure
+sopra (poche connessioni a lungo termine) abbiamo usato uno script Python di
+benchmark che
+simula un numero elevato di client che si connettono al server, effettuano il
+login e poi inviano periodicamente la posizione. Il consumo di CPU del processo
+server è stato campionato in due fasi distinte dell'esecuzione:
+
+- **fase di connessione**: molti utenti si connettono e fanno login nello stesso
+  breve intervallo di tempo;
+- **fase di ricezione dati**: gli utenti, già connessi, inviano solo
+  `PositionUpdate` ogni 30 s (nessun calcolo di statistiche, nessun invio di
+  messaggi broadcast/diretti).
+
+![](docs/img/cpu-vs-utenti-connessi.png)
+
+**Interpretazione.** La fase di connessione è quella effettivamente CPU-intensiva:
+ogni login comporta lettura/validazione delle credenziali e inserimento nel
+registro delle sessioni, e con molti client che arrivano in un breve intervallo
+questi costi si sommano visibilmente sulla CPU del server. È però uno scenario
+raro nell'uso reale: avere migliaia di utenti che si collegano tutti nello
+stesso istante non è il caso tipico della consegna. Nella fase di ricezione dati,
+invece, il consumo di CPU resta notevolmente basso anche con molti utenti
+connessi, perché il server si limita a ricevere e persistere le posizioni (nessun
+calcolo di statistiche o invio di messaggi in questo scenario), confermando la
+natura I/O-bound del sistema anche a un numero di connessioni ben superiore a
+quello richiesto dalla consegna.
+
+### 4.3 Dimensione degli eseguibili
 
 Build `cargo build --workspace --release`, senza `strip`, su `2cf344b`. Il filtro
 `chrono-tz` sul solo fuso `Europe/Rome` (`.cargo/config.toml`) toglie ~1,7 MB al
@@ -323,15 +360,15 @@ lettura CPU (`sysinfo`) sono compilati solo nel server. Il divario Windows / Lin
 dipende da toolchain e linker (MSVC vs GNU). Oltre al filtro sui fusi non sono
 applicati `strip`, LTO o `panic = "abort"`.
 
-### 4.3 Portabilità multipiattaforma
+### 4.4 Portabilità multipiattaforma
 
 Nessun percorso `#[cfg(...)]` specifico per un sistema operativo: rete, filesystem,
 tempo e lettura CPU passano per `tokio`, `std` o `sysinfo`.
 
-| Piattaforma | Build release | Test automatici | Esecuzione |
-|---|---|---|---|
-| Windows 11 (x86_64) | ✅ | ✅ 150 test verdi | ✅ verifica manuale: login multi-client, `/all`, `/to`, transizioni di stato da console, `/stats` |
-| Linux x86-64 | ✅ | ✅ 150 test verdi (`cargo test --workspace`) | ✅ i test end-to-end avviano il binario `server` reale e ci comunicano via TCP |
+| Piattaforma | Build release | Test automatici |
+|---|---|---|
+| Windows 11 (x86_64) | sì | 150 test verdi |
+| Linux x86-64 | sì | 150 test verdi |
 
 ---
 
@@ -367,7 +404,7 @@ Stato: tutti verdi in locale su Windows 11 e Linux x86-64.
 | `client` (bin) | 4 | Parsing degli argomenti, simulatore. |
 | End-to-end (`server/tests/e2e_login.rs`) | 6 | Avviano il server reale e parlano TCP: doppio login rifiutato; disconnessione non notificata agli altri; chat verso utente inesistente che non crasha; posizione non notificata agli altri; messaggio diretto che arriva al destinatario; riconnessione che apre una nuova sessione di tracking. |
 
-Copertura rispetto alla checklist di `ORGANIZZAZIONE.md`:
+Copertura rispetto alla checklist concordata dal gruppo:
 
 | Voce richiesta | Coperta da |
 |---|---|
@@ -391,18 +428,14 @@ e i test end-to-end parlano il protocollo direttamente.
 ## 6. Decisioni di progetto
 
 - **Gli utenti non vedono lo stato degli altri utenti.** Lo stato è gestito e
-  mantenuto dal server ed è visibile all'operatore (console, `/users`, `/stats`);
-  il messaggio `StateChanged` è stato rimosso dal protocollo. La consegna chiede
-  che sia il sistema a gestire lo stato, non che gli utenti se lo scambino.
+  mantenuto dal server ed è visibile all'operatore (console, `/users`, `/stats`).
 - **La chat è solo fra client e server, non fra utenti.** Le due entità del
   dominio sono i camionisti e l'amministratore: l'amministratore invia messaggi
   (a uno o a tutti) e i camionisti gli rispondono. Un `ChatToServer` non viene mai
-  inoltrato ad altri client. Questo è coerente con la rimozione di `StateChanged`
-  e con il modello "l'amministratore controlla i camionisti".
-- **Storico posizioni persistito su file** (`tracking_history.json`), non più solo
+  inoltrato ad altri client.
+- **Storico posizioni persistito su file** (`tracking_history.json`), non solo
   in memoria: le statistiche su settimana/mese devono sopravvivere ai riavvii.
-- **Lo stato dei veicoli non è persistito** (solo in memoria, `state.rs`). È una
-  scelta, non una dimenticanza: al riavvio del server non esistono connessioni,
+- **Lo stato dei veicoli non è persistito** Al riavvio del server non esistono connessioni,
   quindi lo stato corretto di ogni utente è comunque `Disconnected`, e viene
   ricostruito dai `PositionUpdate` non appena i client si riconnettono. Persisterlo
   darebbe uno stato "vecchio" potenzialmente falso.
@@ -416,16 +449,11 @@ e i test end-to-end parlano il protocollo direttamente.
 - **`Europe/Rome`, settimana da lunedì** per gli intervalli temporali.
 - **JSON** come formato di serializzazione in questa fase.
 
-Ancora aperte: passaggio a un formato binario (`bincode`) — non necessario alle
-frequenze attuali; comportamento della console con `stdin` non interattivo (§ 7).
-
 ---
 
 ## 7. Limiti noti e lavoro futuro
 
-- **Console operatore e `stdin` non interattivo**: se il server è lanciato in
-  background senza input, la console legge EOF subito e il processo termina.
-- **Stato dei veicoli non persistito** (§ 6): al riavvio riparte da `Disconnected`.
+- **Stato dei veicoli non persistito**: al riavvio riparte da `Disconnected`.
   È corretto per come è definito lo stato, ma va tenuto presente se in futuro
   servisse uno "stato all'ultimo contatto".
 - **Errore di scrittura dello storico** (`TrackingError::PersistenceFailed`): la
@@ -434,10 +462,8 @@ frequenze attuali; comportamento della console con `stdin` non interattivo (§ 7
   sempre segnalato, mai silenzioso.
 - **Riduzione della dimensione dell'eseguibile**: applicato solo il filtro sui
   fusi orari; `strip`, LTO e `panic = "abort"` non sono attivi.
-- **Intervallo del log CPU fisso a 120 s** (`cpu_log.rs`): non configurabile da
-  variabile d'ambiente come gli altri tempi del protocollo.
 - **Analisi accessibile solo dalla console operatore** (`/stats`): nessuna
-  interfaccia lato utente, coerentemente con la consegna.
+  interfaccia lato utente.
 
 ---
 
@@ -447,16 +473,16 @@ frequenze attuali; comportamento della console con `stdin` non interattivo (§ 7
 
 Tutti i requisiti della consegna sono soddisfatti:
 
-- **Funzionali** (§ 3): registrazione/autenticazione multi-utente, invio della
+- **Funzionali**: registrazione/autenticazione multi-utente, invio della
   posizione ogni 30 s, gestione dello stato (`sconnesso`/`fermo`/`in movimento`)
   con le transizioni richieste, simulazione del movimento, analisi del movimento
   di un utente (tragitto, velocità media, durata movimento, durata pause) su
   giorno/settimana/mese correnti, messaggistica server→client (broadcast e
   diretta) e client→server.
 - **Non funzionali**: file di log del consumo di CPU generato dal programma ogni
-  2 minuti (§ 4.1), attenzione a consumo di CPU e dimensione dell'eseguibile
-  (§ 4.1–4.2), esecuzione verificata su due piattaforme (§ 4.3), dimensione degli
-  eseguibili riportata (§ 4.2).
+  2 minuti, attenzione a consumo di CPU e dimensione dell'eseguibile,
+  esecuzione verificata su due piattaforme, dimensione degli
+  eseguibili riportata.
 
 L'interpretazione del dominio segue i chiarimenti forniti a lezione: le due
 entità sono i **camionisti** e l'**amministratore dell'azienda**; le analisi le fa
@@ -494,7 +520,7 @@ umano, verso un singolo utente o in broadcast.
 
 ### 8.4 Possibili sviluppi
 
-Sintesi dei limiti noti (§ 7): `strip`/LTO/`panic = "abort"` per ridurre ancora i
+Sintesi dei limiti noti: `strip`/LTO/`panic = "abort"` per ridurre ancora i
 binari; console utilizzabile senza un operatore collegato allo `stdin`; intervallo
 del log CPU configurabile come gli altri tempi; passaggio a un formato di
 serializzazione binario se il traffico crescesse; eventuale interfaccia dedicata
@@ -514,7 +540,7 @@ verificate da una suite di test che gira identica sulle due piattaforme.
 
 | Voce | Risultato |
 |---|---|
-| Requisiti funzionali della consegna | Tutti implementati (§ 3) |
+| Requisiti funzionali della consegna | Tutti implementati |
 | Test automatici | 150 / 150 verdi (identico su Windows e Linux) |
 | Formattazione (`cargo fmt --check`) | Nessuna differenza |
 | Analisi statica (`cargo clippy -D warnings`) | Nessun warning |
@@ -522,15 +548,15 @@ verificate da una suite di test che gira identica sulle due piattaforme.
 | Piattaforme verificate | Windows 11 + Linux x86-64: build + test + esecuzione |
 | Dimensione `server` (release) | Windows 1 493 504 B (1.42 MiB) · Linux 2 258 536 B (2.15 MiB) |
 | Dimensione `client` (release) | Windows 884 736 B (0.84 MiB) · Linux 1 357 592 B (1.29 MiB) |
-| Log CPU | `cpu_usage.log`, una riga ogni 120 s; consumo del processo server media 0.03 %, max 0.04 % (§ 4.1) |
+| Log CPU | `cpu_usage.log`, una riga ogni 120 s; consumo del processo server media 0.03 %, max 0.04 % |
 | Controlli automatici | Workflow `.github/workflows/ci.yaml`; su GitHub Actions sospeso per billing, eseguiti in locale su Windows e Linux |
 
 ---
 
 ## 10. Come si esegue (sintesi)
 
-Dettaglio, vincoli sulle credenziali e variabili d'ambiente: `georuggine/README.md`.
-Guida d'uso: `MANUALE_UTENTE.md`. Sequenza di dimostrazione: `DEMO.md`.
+Dettaglio, vincoli sulle credenziali e variabili d'ambiente: `MANUALE_UTENTE.md`.
+Sequenza di dimostrazione: `DEMO.md`.
 
 ```bash
 # dalla cartella georuggine/

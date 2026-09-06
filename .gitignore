@@ -29,8 +29,6 @@ tracking_history.json
 .DS_Store
 Thumbs.db
 
-ORGANIZZAZIONE-2.pdf
-
 # Temporaneo della scrittura atomica dello storage utenti (users.rs)
 users.json.tmp
 

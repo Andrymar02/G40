@@ -170,7 +170,7 @@ I comandi si digitano **sullo standard input del processo server**.
 | `/users` | elenco degli utenti connessi con lo stato corrente |
 | `/all <testo>` | invia `<testo>` a tutti i client connessi |
 | `/to <utente> <testo>` | invia `<testo>` al solo `<utente>` |
-| `/stats <utente> <periodo>` | report di movimento di `<utente>` (vedi § 3.4) |
+| `/stats <utente> <periodo>` | report di movimento di `<utente>` (vedi sezione 3.4) |
 | `/help` | ristampa l'elenco dei comandi |
 
 I messaggi sono **testo libero scritto dall'amministratore**, per esempio:
@@ -300,7 +300,7 @@ GEORUGGINE_IDLE_THRESHOLD=10 cargo run -p server --release
 GEORUGGINE_POSITION_INTERVAL=2 cargo run -p client --release -- login mrossi camion-2024
 ```
 
-Dettagli in `georuggine/README.md`. Sequenza di dimostrazione completa: `DEMO.md`.
+Sequenza di dimostrazione completa: `DEMO.md`.
 
 ---
 

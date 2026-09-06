@@ -23,7 +23,7 @@ GEORUGGINE_IDLE_THRESHOLD=10 GEORUGGINE_CLIENT_TIMEOUT=30 cargo run -p server --
   (storico persistito su file, sopravvive ai riavvii) e, entro due minuti,
   `cpu_usage.log` con una riga ogni 120 s: `[...] CPU process usage: 0.xx%`.
   Commentare che il consumo del processo resta sotto il decimo di punto
-  percentuale (vedi `MANUALE_PROGETTISTA.md` § 4.1).
+  percentuale (vedi `MANUALE_PROGETTISTA.md`, sezione 4.1).
 
 ## 2. Registrazione, login, comunicazione
 
