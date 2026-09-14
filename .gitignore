@@ -1,0 +1,39 @@
+# Cargo: cartella di build (target debug/release, artefatti compilati)
+target/
+
+# Backup generati da `cargo fmt`
+**/*.rs.bk
+
+# Debug info generata dai build MSVC (irrilevante su Linux, ma innocuo tenerlo)
+*.pdb
+
+# PDF (es. materiale del progetto, non file sorgente)
+*.pdf
+
+# Variabili d'ambiente / segreti locali (es. credenziali DB, se il server ne avrà)
+.env
+.env.*
+
+# Storage utenti del server (credenziali registrate, dati locali di sviluppo)
+users.json
+
+# Storico posizioni del server (sessioni + campioni, dati locali di sviluppo)
+tracking_history.json
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# File di sistema
+.DS_Store
+Thumbs.db
+
+# Temporaneo della scrittura atomica dello storage utenti (users.rs)
+users.json.tmp
+
+# Temporaneo della scrittura atomica dello storico posizioni (tracking/repository.rs)
+tracking_history.json.tmp
+
+# Temporaneo CPU usage
+cpu_usage.log
